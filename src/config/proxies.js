@@ -14,11 +14,10 @@
  */
 const userServiceProxy = {
   target: process.env.USER_SERVICE_URL || 'http://localhost:3001',
-  changeOrigin: true, // Change l'en-tête Host pour correspondre au service cible
+  changeOrigin: true,
   pathRewrite: {
-    '^/api/users': '', // Retire /api/users avant de转发 vers le service
+    '^/api/users(?=/|$)': '',
   },
-  // Configuration du logger pour le debug
   logLevel: 'debug',
   // Gestion des erreurs
   onError: (err, req, res) => {
@@ -45,7 +44,7 @@ const patientServiceProxy = {
   target: process.env.PATIENT_SERVICE_URL || 'http://localhost:3002',
   changeOrigin: true,
   pathRewrite: {
-    '^/api/patients': '', // Retire /api/patients avant de转发
+    '^/api/patients(?=/|$)': '',
   },
   logLevel: 'debug',
   onError: (err, req, res) => {
@@ -73,7 +72,7 @@ const consultationServiceProxy = {
   target: process.env.CONSULTATION_SERVICE_URL || 'http://localhost:3003',
   changeOrigin: true,
   pathRewrite: {
-    '^/api/consultations': '', // Retire /api/consultations avant de转发
+    '^/api/consultations(?=/|$)': '',
   },
   logLevel: 'debug',
   onError: (err, req, res) => {

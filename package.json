@@ -5,15 +5,18 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "dev": "node src/server.js"
+    "dev": "node src/server.js",
+    "build": "cd ../frontend && npm install && npm run build && cd ../backend && npm install && npm run build",
+    "deploy:full": "npm install && npm start"
   },
   "author": "Dupont corporation",
   "license": "ISC",
   "dependencies": {
     "cors": "^2.8.5",
     "dotenv": "^16.6.1",
-    "express": "^5.2.1",
+    "express": "^4.21.0",
     "express-rate-limit": "^7.4.0",
-    "http-proxy-middleware": "^2.0.7"
+    "http-proxy-middleware": "^2.0.7",
+    "jsonwebtoken": "^9.0.3"
   }
 }

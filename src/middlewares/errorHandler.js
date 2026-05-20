@@ -1,7 +1,7 @@
 /**
  * Middleware de gestion des erreurs
  *
- * Intercepte et gestionnaire toutes les erreurs non traitées
+ * Intercepte et gère toutes les erreurs non traitées
  * dans l'application. Retourne une réponse JSON appropriée.
  *
  * @author Dupont Corporation

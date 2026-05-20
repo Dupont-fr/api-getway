@@ -48,14 +48,10 @@ app.use(logger)
 // Middleware de limitatation de requêtes (rate limiting)
 app.use(rateLimiter)
 
-// Middleware pour parser les corps de requêtes JSON
-app.use(express.json())
-
-// Middleware pour parser les données de formulaires
-app.use(express.urlencoded({ extended: true }))
-
 // ============================================
 // Configuration des proxys vers les microservices
+// (doivent être AVANT les body parsers pour
+//  ne pas consommer le flux brut des requêtes)
 // ============================================
 
 /**
@@ -88,6 +84,17 @@ app.use(
   authMiddleware,
   createProxyMiddleware(proxyConfig.consultationService),
 )
+
+// ============================================
+// Body parsers (après les proxy pour ne pas
+// interférer avec le flux des requêtes proxy)
+// ============================================
+
+// Middleware pour parser les corps de requêtes JSON
+app.use(express.json())
+
+// Middleware pour parser les données de formulaires
+app.use(express.urlencoded({ extended: true }))
 
 // ============================================
 // Routes de l'API Gateway
