@@ -15,13 +15,15 @@ const limiter = rateLimit({
     return req.ip || req.connection.remoteAddress
   },
   skip: (req) => {
-    if (req.path === '/api/users/login') return true
+    const path = req.originalUrl || req.url || req.path || ''
+    if (path.includes('/login') || path.includes('/register')) return true
+    if (path === '/health' || path === '/') return true
     return !req.ip
   },
   standardHeaders: true,
   legacyHeaders: false,
   handler: (req, res) => {
-    console.warn(`⚠️  Rate limit atteint pour IP: ${req.ip}`)
+    console.warn(`⚠️  Rate limit atteint pour IP: ${req.ip} sur ${req.originalUrl}`)
     res.status(429).json({
       success: false,
       error: {
