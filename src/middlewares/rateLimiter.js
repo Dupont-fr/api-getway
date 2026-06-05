@@ -15,6 +15,7 @@ const limiter = rateLimit({
     return req.ip || req.connection.remoteAddress
   },
   skip: (req) => {
+    if (req.path === '/api/users/login') return true
     return !req.ip
   },
   standardHeaders: true,
