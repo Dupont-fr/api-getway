@@ -12,12 +12,18 @@
  * Configuration du proxy vers le service utilisateur
  * Gère l'authentification et la gestion des rôles
  */
+const rewritePath = (prefix) => (path) => {
+  const i = path.indexOf('?')
+  const p = i === -1 ? path : path.slice(0, i)
+  const qs = i === -1 ? '' : path.slice(i)
+  const stripped = p.replace(new RegExp('^' + prefix + '(?=/|$)'), '') || '/'
+  return stripped + qs
+}
+
 const userServiceProxy = {
   target: process.env.USER_SERVICE_URL || 'http://localhost:3001',
   changeOrigin: true,
-  pathRewrite: {
-    '^/api/users(?=/|$)': '',
-  },
+  pathRewrite: rewritePath('/api/users'),
   logLevel: 'debug',
   // Gestion des erreurs
   onError: (err, req, res) => {
@@ -37,43 +43,13 @@ const userServiceProxy = {
 }
 
 /**
- * Configuration du proxy vers le service patient
- * Gère les informations des patients
- */
-const patientServiceProxy = {
-  target: process.env.PATIENT_SERVICE_URL || 'http://localhost:3002',
-  changeOrigin: true,
-  pathRewrite: {
-    '^/api/patients(?=/|$)': '',
-  },
-  logLevel: 'debug',
-  onError: (err, req, res) => {
-    console.error('❌ Erreur proxy patient-service:', err.message)
-    res.status(503).json({
-      error: 'Service indisponible',
-      message: 'patient-service temporairement inaccessible',
-    })
-  },
-  onProxyReq: (proxyReq, req) => {
-    console.log(
-      `📤 Proxy vers patient-service: ${req.method} ${req.originalUrl}`,
-    )
-  },
-  onProxyRes: (proxyRes, req, res) => {
-    console.log(`📥 Réponse de patient-service: ${proxyRes.statusCode}`)
-  },
-}
-
-/**
  * Configuration du proxy vers le service consultation
  * Gère les dossiers médicaux et consultations
  */
 const consultationServiceProxy = {
   target: process.env.CONSULTATION_SERVICE_URL || 'http://localhost:3003',
   changeOrigin: true,
-  pathRewrite: {
-    '^/api/consultations(?=/|$)': '',
-  },
+  pathRewrite: rewritePath('/api/consultations'),
   logLevel: 'debug',
   onError: (err, req, res) => {
     console.error('❌ Erreur proxy consultation-service:', err.message)
@@ -89,6 +65,30 @@ const consultationServiceProxy = {
   },
   onProxyRes: (proxyRes, req, res) => {
     console.log(`📥 Réponse de consultation-service: ${proxyRes.statusCode}`)
+  },
+}
+
+/**
+ * Configuration du proxy vers le service patient
+ * Gère la création et la recherche des patients
+ */
+const patientServiceProxy = {
+  target: process.env.PATIENT_SERVICE_URL || 'http://localhost:3002',
+  changeOrigin: true,
+  pathRewrite: rewritePath('/api/patients'),
+  logLevel: 'debug',
+  onError: (err, req, res) => {
+    console.error('❌ Erreur proxy patient-service:', err.message)
+    res.status(503).json({
+      error: 'Service indisponible',
+      message: 'patient-service temporairement inaccessible',
+    })
+  },
+  onProxyReq: (proxyReq, req) => {
+    console.log(`📤 Proxy vers patient-service: ${req.method} ${req.originalUrl}`)
+  },
+  onProxyRes: (proxyRes, req, res) => {
+    console.log(`📥 Réponse de patient-service: ${proxyRes.statusCode}`)
   },
 }
 

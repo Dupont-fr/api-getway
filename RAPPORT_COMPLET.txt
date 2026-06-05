@@ -1,0 +1,980 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                                                                            ║
+║              RAPPORT TECHNIQUE - API GATEWAY & MICROSERVICES               ║
+║              Application de Gestion Hospitalière (MediSys)                 ║
+║                                                                            ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+Date du rapport : 04/06/2026
+Projet : Software As Service
+Architecture : Microservices avec API Gateway
+
+═══════════════════════════════════════════════════════════════════════════════
+                        1. ARCHITECTURE GÉNÉRALE
+═══════════════════════════════════════════════════════════════════════════════
+
+                        ┌─────────────────────┐
+                        │     FRONTEND        │
+                        │  React + Vite       │
+                        │  http://localhost:5173│
+                        └──────────┬──────────┘
+                                   │
+                                   │ HTTP (Axios)
+                                   ▼
+                        ┌─────────────────────┐
+                        │   API GATEWAY       │
+                        │   Port 3000         │
+                        │   Express + Proxy   │
+                        └──┬──────┬──────┬────┘
+                           │      │      │
+              ┌────────────┘      │      └────────────┐
+              ▼                   ▼                   ▼
+    ┌─────────────────┐  ┌──────────────┐  ┌──────────────────┐
+    │  USER-SERVICE   │  │PATIENT-SERV. │  │CONSULTATION-SERV.│
+    │  Port 3001      │  │  Port 3002   │  │  Port 3003       │
+    │  MongoDB        │  │  PostgreSQL  │  │  NON IMPLÉMENTÉ  │
+    │  Authentification│  │  Gestion     │  │  (stub)          │
+    │  Rôles          │  │  patients    │  │                  │
+    └─────────────────┘  └──────────────┘  └──────────────────┘
+
+
+═══════════════════════════════════════════════════════════════════════════════
+                   2. API GATEWAY (Getway/)
+═══════════════════════════════════════════════════════════════════════════════
+
+2.1 Emplacement : /Getway
+2.2 Technologies :
+    - Node.js (v22)
+    - Express 4.21
+    - http-proxy-middleware 2.0.7
+    - jsonwebtoken 9.0.3
+    - express-rate-limit 7.4.0
+    - dotenv 16.6.1
+    - cors 2.8.5
+
+2.3 Fichiers de configuration :
+    - .env                    Variables d'environnement
+    - package.json            Dépendances et scripts
+    - src/server.js           Point d'entrée principal
+    - src/config/proxies.js   Configuration des proxys
+    - src/middlewares/auth.js Authentification JWT
+    - src/middlewares/logger.js  Logging des requêtes
+    - src/middlewares/rateLimiter.js  Limitation de débit
+    - src/middlewares/errorHandler.js  Gestion des erreurs
+
+2.4 .env (Getway)
+    ┌─────────────────────────────────────────────────────┐
+    │ PORT=3000                                            │
+    │ HOST=localhost                                       │
+    │ NODE_ENV=development                                 │
+    │ USER_SERVICE_URL=http://localhost:3001               │
+    │ PATIENT_SERVICE_URL=http://localhost:3002            │
+    │ CONSULTATION_SERVICE_URL=http://localhost:3003       │
+    │ JWT_SECRET=dev-secret-key-change-in-production       │
+    │ RATE_LIMIT_WINDOW_MS=900000                          │
+    │ RATE_LIMIT_MAX_REQUESTS=100                          │
+    └─────────────────────────────────────────────────────┘
+
+2.5 Routage des proxys :
+
+    ┌─────────────────────┬──────────────────┬─────────────────────┐
+    │ URL Gateway         │ Cible            │ Service             │
+    ├─────────────────────┼──────────────────┼─────────────────────┤
+    │ /api/users/*        │ localhost:3001/* │ user-service        │
+    │ /api/patients/*     │ localhost:3002/* │ patients-service    │
+    │ /api/consultations/*│ localhost:3003/* │ consultation-service│
+    └─────────────────────┴──────────────────┴─────────────────────┘
+
+    Les proxys utilisent pathRewrite pour supprimer le préfixe
+    (ex: /api/users/login → /login) avant de transmettre la requête.
+
+2.6 Middleware applicatif (ordre d'exécution) :
+    1. cors()                         - CORS headers
+    2. logger                         - Journalisation
+    3. rateLimiter                    - Rate limiting
+    4. auth (sur chaque proxy)        - Vérification JWT
+    5. errorHandler                   - Gestion globale erreurs
+
+2.7 Routes intégrées directement dans le Gateway :
+    - GET  /health                    - Health check
+    - GET  /                          - Page d'accueil API
+    - GET  /api/statistique           - Statistiques (mock)
+    - GET  /api/statistique/hopitaux/:id - Stats par hôpital (mock)
+    - POST /api/statistique/rapport   - Générer rapport (mock)
+
+2.8 Middleware d'authentification (auth.js) :
+    - Vérifie le header "Authorization: Bearer <token>"
+    - En développement (NODE_ENV=development) : sautée
+    - En production : jwt.verify(token, JWT_SECRET)
+    - Exporte requireRole(...roles) pour les vérifications de rôle
+
+2.9 Limitation de débit (rateLimiter.js) :
+    - Fenêtre : 15 minutes (configurable via RATE_LIMIT_WINDOW_MS)
+    - Maximum : 100 requêtes par fenêtre (configurable)
+    - Réponse : 429 JSON
+
+═══════════════════════════════════════════════════════════════════════════════
+                     3. USER-SERVICE (user-service/)
+═══════════════════════════════════════════════════════════════════════════════
+
+3.1 Emplacement : /user-service
+3.2 Technologies :
+    - Express 4.18
+    - MongoDB avec Mongoose 8.0
+    - bcryptjs 2.4 (hash des mots de passe)
+    - jsonwebtoken 9.0
+    - nodemailer 8.0 (emails via Brevo/SendinBlue)
+
+3.3 Base de données : MongoDB (Atlas cloud)
+    - URI : mongodb+srv://dupontdjeague:dupont@cluster0.t2xncq8.mongodb.net/Hospital
+    - Driver : Mongoose 8.0
+
+3.4 Structure des collections :
+
+    Collection "users" :
+    ┌─────────────────────┬──────────────┬─────────────────────────────┐
+    │ Champ               │ Type         │ Contrainte                 │
+    ├─────────────────────┼──────────────┼─────────────────────────────┤
+    │ nameUser            │ String       │ Requis, min 2 caractères   │
+    │ emailUser           │ String       │ Requis, unique, lowercase  │
+    │ passwordUser        │ String       │ Requis, min 8, select:false│
+    │ roleUser            │ Enum         │ ADMIN/MEDECIN/ACCUEIL      │
+    │ mustChangePasswordUser│ Boolean    │ Défaut: false              │
+    │ hospitalUser        │ String       │ Référence à l'hôpital     │
+    │ specialtyUser       │ String       │ Spécialité médicale        │
+    │ createdAtUser       │ Date         │ Défaut: Date.now           │
+    └─────────────────────┴──────────────┴─────────────────────────────┘
+
+    Collection "hospitals" :
+    ┌─────────────────────┬──────────────┬─────────────────────────────┐
+    │ Champ               │ Type         │ Contrainte                 │
+    ├─────────────────────┼──────────────┼─────────────────────────────┤
+    │ nameHospital        │ String       │ Requis, unique             │
+    │ servicesHospital    │ [String]     │ Liste des services         │
+    └─────────────────────┴──────────────┴─────────────────────────────┘
+
+3.5 Rôles disponibles :
+    ┌──────────┬──────────────────────────────────────────────────┐
+    │ Rôle     │ Permissions                                      │
+    ├──────────┼──────────────────────────────────────────────────┤
+    │ ADMIN    │ Gestion complète des utilisateurs + vue globale  │
+    │ MEDECIN  │ Consultation, patients, soins médicaux           │
+    │ ACCUEIL  │ Création/recherche patients, accueil             │
+    └──────────┴──────────────────────────────────────────────────┘
+
+3.6 API exposée (via le Gateway : /api/users/...) :
+
+    ┌──────────┬──────────────────────────┬────────────────────────┐
+    │ Méthode  │ Endpoint                 │ Accès                  │
+    ├──────────┼──────────────────────────┼────────────────────────┤
+    │ POST     │ /login                   │ Public                 │
+    │ POST     │ /register               │ Admin                  │
+    │ POST     │ /register/admin         │ Public (bootstrap)     │
+    │ POST     │ /change-password        │ Authentifié            │
+    │ GET      │ /users                  │ Admin                  │
+    │ GET      │ /users/:id              │ Admin, Médecin         │
+    │ PUT      │ /users/:id              │ Admin                  │
+    │ DELETE   │ /users/:id              │ Admin                  │
+    │ GET      │ /hospitals              │ Authentifié            │
+    │ GET      │ /hospitals/:id          │ Authentifié            │
+    │ POST     │ /hospitals              │ Authentifié            │
+    └──────────┴──────────────────────────┴────────────────────────┘
+
+3.7 Fonctionnalités notables :
+    - Hash bcrypt (salt rounds: 10) avec hook pre('save')
+    - Génération et vérification JWT (24h d'expiration)
+    - Envoi d'emails transactionnels via Brevo (inscription,
+      notification de connexion, changement de mot de passe)
+    - Validation de la force du mot de passe (majuscule, minuscule,
+      chiffre, caractère spécial, min 8 caractères)
+    - Filtre de recherche sur /users (nom, email)
+    - Seed scripts disponibles : seed.js, seed-hospitals.js
+
+═══════════════════════════════════════════════════════════════════════════════
+                   4. PATIENTS-SERVICE (patients-service/)
+═══════════════════════════════════════════════════════════════════════════════
+
+4.1 Emplacement : /patients-service
+4.2 Technologies :
+    - Express 5.2
+    - PostgreSQL avec pg 8.13
+    - jsonwebtoken 9.0
+    - crypto (génération de codes patients)
+
+4.3 Base de données : PostgreSQL locale
+    - URL : postgresql://postgres:dupont@localhost:5432/patients
+    - Host : localhost
+    - Port : 5432
+    - Database : patients
+    - User : postgres
+    - Password : dupont
+
+4.4 Structure de la table "patients" :
+    ┌───────────────────────┬──────────────┬────────────────────────────┐
+    │ Champ                 │ Type         │ Contrainte                │
+    ├───────────────────────┼──────────────┼────────────────────────────┤
+    │ id                    │ SERIAL       │ PRIMARY KEY               │
+    │ code_patient          │ VARCHAR(20)  │ UNIQUE                    │
+    │ prenom_patient        │ VARCHAR(255) │ NOT NULL                  │
+    │ nom_patient           │ VARCHAR(255) │ Optionnel                 │
+    │ date_naissance_patient│ DATE         │ NOT NULL                  │
+    │ genre_patient         │ VARCHAR(10)  │ CHECK (Homme/Femme)      │
+    │ telephone_patient     │ VARCHAR(50)  │ Optionnel                 │
+    │ nom_pere              │ VARCHAR(255) │ Optionnel                 │
+    │ nom_mere              │ VARCHAR(255) │ Optionnel                 │
+    │ adresse_rue           │ VARCHAR(255) │ Optionnel                 │
+    │ adresse_ville         │ VARCHAR(255) │ Optionnel                 │
+    │ adresse_code_postal   │ VARCHAR(20)  │ Optionnel                 │
+    │ hopital               │ VARCHAR(255) │ Optionnel                 │
+    │ created_by            │ VARCHAR(255) │ ID de l'utilisateur      │
+    │ actif                 │ BOOLEAN      │ DEFAULT true              │
+    │ created_at            │ TIMESTAMP    │ DEFAULT CURRENT_TIMESTAMP │
+    │ updated_at            │ TIMESTAMP    │ DEFAULT CURRENT_TIMESTAMP │
+    └───────────────────────┴──────────────┴────────────────────────────┘
+
+4.5 API exposée (via le Gateway : /api/patients/...) :
+
+    ┌──────────┬──────────────────────────────┬──────────────────────┐
+    │ Méthode  │ Endpoint                     │ Description          │
+    ├──────────┼──────────────────────────────┼──────────────────────┤
+    │ GET      │ /                            │ Liste paginée        │
+    │ GET      │ /:id                         │ Détail d'un patient  │
+    │ POST     │ /                            │ Création d'un patient│
+    │ PUT      │ /:id                         │ Modification         │
+    │ DELETE   │ /:id                         │ Suppression physique │
+    │ POST     │ /check-duplicates            │ Vérification doublons│
+    │ PUT      │ /:id/desactiver              │ Désactiver (MEDECIN) │
+    │ PUT      │ /:id/reactiver               │ Réactiver (MEDECIN)  │
+    └──────────┴──────────────────────────────┴──────────────────────┘
+
+    Paramètres de recherche (GET /) :
+    - search : recherche ILIKE sur nom, prénom, code, téléphone
+    - hopital : filtre par hôpital
+    - page : numéro de page (défaut: 1)
+    - limit : nombre par page (défaut: 50)
+
+4.6 Génération automatique du code patient :
+    Format : P-XXXXXXXX (préfixe P- + 8 caractères)
+    Alphabet : ABCDEFGHJKLMNPQRSTUVWXYZ23456789
+    (exclut I, O, 0, 1 pour éviter les ambiguïtés)
+    5 tentatives max en cas de collision UNIQUE
+
+4.7 Détection des doublons (POST /check-duplicates) :
+    Critères de correspondance (OU logique) :
+    - nom_patient ILIKE '%saisie%' (partiel)
+    - prenom_patient ILIKE '%saisie%' (partiel)
+    - date_naissance_patient = date saisie (exact)
+    - téléphone après nettoyage (chiffres seuls, ILIKE %...%)
+
+═══════════════════════════════════════════════════════════════════════════════
+                 5. CONSULTATION-SERVICE (consultations-service/)
+═══════════════════════════════════════════════════════════════════════════════
+
+5.1 Emplacement : /consultations-service
+5.2 Statut : NON IMPLÉMENTÉ
+
+    Le dossier contient uniquement :
+    - package.json (dépendance : express ^5.2.1)
+    - node_modules/
+    - Aucun fichier source (src/ inexistant)
+
+    Le Gateway tente de router vers http://localhost:3003 mais
+    le service n'est pas démarré, ce qui génère des erreurs
+    ECONNREFUSED dans les logs du Gateway.
+
+5.3 Recommandations pour l'implémentation :
+    - Base de données : PostgreSQL (table consultations)
+    - Champs suggérés : id, patient_id, medecin_id, date_consultation,
+      motif, diagnostic, traitement, notes, ordonnance, created_at
+    - Endpoints : CRUD complet + recherche par patient/médecin/date
+
+═══════════════════════════════════════════════════════════════════════════════
+                      6. FRONTEND (frontend/)
+═══════════════════════════════════════════════════════════════════════════════
+
+6.1 Emplacement : /frontend
+6.2 Technologies :
+    - React 19.2
+    - React Router DOM 7.15
+    - Axios 1.16 (HTTP client)
+    - Vite 8.0 (build tool)
+    - Tailwind CSS 4.3 (styles)
+    - Lucide React 1.16 (icônes)
+
+6.3 Configuration :
+    - VITE_API_URL=http://localhost:3000 (Gateway)
+    - Port de développement : 5173
+    - Build : vite build → dist/
+
+6.4 Arborescence des pages :
+    ┌──────────────────────┬──────────────────┬─────────────────────┐
+    │ Pages                │ Chemin           │ Permission requise  │
+    ├──────────────────────┼──────────────────┼─────────────────────┤
+    │ Landing              │ /                │ Public              │
+    │ Login                │ /login           │ Public              │
+    │ Change Password      │ /change-password │ Authentifié         │
+    │ Dashboard            │ /dashboard       │ Authentifié         │
+    │ Liste Utilisateurs   │ /users           │ canViewUsers        │
+    │ Créer Utilisateur    │ /users/create    │ canManageUsers      │
+    │ Modifier Utilisateur │ /users/:id/edit  │ canManageUsers      │
+    │ Liste Patients       │ /patients        │ canViewPatients     │
+    │ Créer Patient        │ /patients/create │ canManagePatients   │
+    │ Détail Patient       │ /patients/:id    │ canViewPatients     │
+    │ Modifier Patient     │ /patients/:id/edit│ canManagePatients  │
+    │ Liste Consultations  │ /consultations   │ canViewConsultations│
+    │ Créer Consultation   │ /consultations/create│ canManageConsult │
+    │ Modifier Consultation│ /consultations/:id/edit│ canManageConsult│
+    └──────────────────────┴──────────────────┴─────────────────────┘
+
+6.5 Matrice des permissions (roleHelpers.js) :
+    ┌──────────┬──────────┬──────────┬──────────┬──────────────────┐
+    │          │  ADMIN   │ MEDECIN  │ ACCUEIL  │                  │
+    ├──────────┼──────────┼──────────┼──────────┤                  │
+    │ ViewUsers│ OUI      │ NON      │ NON      │                  │
+    │ ManageUs.│ OUI      │ NON      │ NON      │                  │
+    │ ViewPat. │ OUI      │ OUI      │ OUI      │                  │
+    │ ManagePat│ NON      │ OUI      │ OUI      │                  │
+    │ DeletePat│ NON      │ OUI      │ NON      │                  │
+    │ ViewCons.│ OUI      │ OUI      │ OUI      │                  │
+    │ ManageCo.│ NON      │ OUI      │ NON      │                  │
+    └──────────┴──────────┴──────────┴──────────┴──────────────────┘
+
+6.6 Authentification (AuthContext) :
+    - Stockage : localStorage (user, token, mustChangePassword)
+    - Intercepteur Axios : ajoute automatiquement le Bearer token
+    - Déconnexion automatique sur 401 (hors /login)
+
+═══════════════════════════════════════════════════════════════════════════════
+                  7. FLUX D'AUTHENTIFICATION COMPLET
+═══════════════════════════════════════════════════════════════════════════════
+
+    Étape 1 : Frontend → POST /api/users/login
+             Body : { emailUser, passwordUser }
+
+    Étape 2 : Gateway reçoit la requête
+             - Logger enregistre la requête
+             - Rate limiter vérifie le quota
+             - Proxy /api/users → http://localhost:3001/login
+
+    Étape 3 : user-service traite le login
+             - AuthService.login() cherche l'utilisateur par email
+             - bcrypt.compare() vérifie le mot de passe
+             - generateToken() crée le JWT { id, email, role }
+             - Envoi email notification de connexion (via Brevo)
+
+    Étape 4 : Gateway retourne la réponse au frontend
+             - { success, token, user: { id, nameUser, emailUser, roleUser } }
+
+    Étape 5 : Frontend stocke le token et l'utilisateur
+             - AuthContext.login(userData, token)
+             - Redirection vers /dashboard
+
+
+═══════════════════════════════════════════════════════════════════════════════
+             8. SCHÉMA DE COMMUNICATION INTER-SERVICES
+═══════════════════════════════════════════════════════════════════════════════
+
+    Toute communication entre le frontend et les microservices passe
+    EXCLUSIVEMENT par le Gateway. Les microservices ne sont jamais
+    appelés directement par le frontend.
+
+    Frontend (5173)                    Gateway (3000)
+    ┌─────────┐                       ┌──────────────┐
+    │ Axios   │── POST /api/users/login──▶│ Proxy users  │──▶ user-service (3001)
+    │ baseURL │                          │ Proxy pat.   │──▶ patient-serv. (3002)
+    │:3000    │                          │ Proxy cons.  │──▶ consultation  (3003)
+    └─────────┘                       └──────────────┘
+
+    Le Gateway :
+    - Ajoute le middleware d'auth JWT avant chaque proxy
+    - Forwarde le token original dans le header Authorization
+    - Chaque microservice vérifie le token de son côté
+    - Tous les services partagent le même JWT_SECRET
+
+═══════════════════════════════════════════════════════════════════════════════
+            9. DÉPLOIEMENT (ENVIRONNEMENT DE PRODUCTION)
+═══════════════════════════════════════════════════════════════════════════════
+
+9.1 Architecture cible (Render) :
+    - Gateway : Web Service Render (Node)
+    - user-service : Web Service Render (Node + MongoDB Atlas)
+    - patients-service : Web Service Render (Node + PostgreSQL Render)
+    - consultation-service : À déployer (quand implémenté)
+    - Frontend : Static Site Render (Vite build → dist/)
+
+9.2 Fichiers .env.production :
+    Chaque service doit avoir un .env.production avec les URLs
+    de production (Render) au lieu des URLs locales (localhost).
+
+9.3 Commandes de build :
+    Gateway : npm run build (installe les dépendances)
+    Frontend : npm run build → dist/ (fichiers statiques)
+
+═══════════════════════════════════════════════════════════════════════════════
+                 10. DÉPENDANCES COMPLÈTES (package.json)
+═══════════════════════════════════════════════════════════════════════════════
+
+    Gateway :
+    ├── express ^4.21.0
+    ├── http-proxy-middleware ^2.0.7
+    ├── jsonwebtoken ^9.0.3
+    ├── express-rate-limit ^7.4.0
+    ├── cors ^2.8.5
+    └── dotenv ^16.6.1
+
+    user-service :
+    ├── express ^4.18.2
+    ├── mongoose ^8.0.3
+    ├── bcryptjs ^2.4.3
+    ├── jsonwebtoken ^9.0.2
+    ├── nodemailer ^8.0.7
+    ├── cors ^2.8.6
+    └── dotenv ^16.6.1
+
+    patients-service :
+    ├── express ^5.2.1
+    ├── pg ^8.13.0
+    ├── jsonwebtoken ^9.0.2
+    ├── cors ^2.8.6
+    └── dotenv ^16.6.1
+
+    frontend :
+    ├── react ^19.2.5
+    ├── react-dom ^19.2.5
+    ├── react-router-dom ^7.15.1
+    ├── axios ^1.16.1
+    └── lucide-react ^1.16.0
+
+═══════════════════════════════════════════════════════════════════════════════
+                  11. COMMANDES DE DÉMARRAGE (DÉVELOPPEMENT)
+═══════════════════════════════════════════════════════════════════════════════
+
+    # Terminal 1 : user-service (port 3001)
+    cd user-service
+    npm run dev
+
+    # Terminal 2 : patients-service (port 3002)
+    cd patients-service
+    npm run dev
+
+    # Terminal 3 : Gateway (port 3000)
+    cd Getway
+    npm run dev
+
+    # Terminal 4 : Frontend (port 5173)
+    cd frontend
+    npm run dev
+
+    NOTA : consultation-service n'est pas encore implémenté.
+    Le Gateway loguera des erreurs ECONNREFUSED pour /api/consultations
+    tant que le service ne tourne pas. Cela n'affecte pas les autres services.
+
+═══════════════════════════════════════════════════════════════════════════════
+              12. WORKFLOW DE CRÉATION D'UN PATIENT (COMPLET)
+═══════════════════════════════════════════════════════════════════════════════
+
+    1. Frontend : remplir le formulaire (Nom*, Prénom, Date naissance*,
+       Sexe*, Téléphone, Parents, Adresse)
+    2. Frontend : cliquer "Créer le patient"
+    3. Frontend : POST /api/patients/check-duplicates (body: form data)
+       ↘ Gateway → patients-service → checkDuplicates()
+       ↳ Si doublons détectés → modale de vérification
+         → "Créer quand même" ou "Revenir au formulaire"
+       ↳ Si aucun doublon → création directe
+    4. Frontend : POST /api/patients (body: form data)
+       ↘ Gateway → patients-service → create()
+       ↳ Génération du code patient unique (P-XXXXXXXX)
+       ↳ Insertion en base PostgreSQL
+    5. Réponse : 201 + données du patient avec code
+    6. Frontend : redirection vers /patients/{id} (page détail)
+
+═══════════════════════════════════════════════════════════════════════════════
+              13. WORKFLOW DE CONNEXION UTILISATEUR (COMPLET)
+═══════════════════════════════════════════════════════════════════════════════
+
+    1. Frontend : remplir email + mot de passe
+    2. Frontend : POST /api/users/login (body: { emailUser, passwordUser })
+       ↘ Gateway (limiteur + logger) → user-service
+    3. user-service : AuthService.login()
+       - Cherche user par email dans MongoDB
+       - Compare password avec bcrypt
+       - Génère JWT (24h)
+       - Envoie email de notification (Brevo)
+       - Retourne { success: true, token, user }
+    4. Gateway → Frontend
+    5. Frontend : AuthContext.login(user, token)
+       - Stocke dans localStorage
+       - Redirige vers /dashboard
+    6. Toutes les requêtes suivantes : Axios interceptor
+       ajoute automatiquement "Authorization: Bearer <token>"
+
+═══════════════════════════════════════════════════════════════════════════════
+                   14. GESTION DES ERREURS (ERROR HANDLING)
+═══════════════════════════════════════════════════════════════════════════════
+
+    Gateway (errorHandler.js) :
+    - Formate toutes les erreurs en JSON
+    - Codes gérés : 400, 401, 403, 404, 429, 500
+    - Structure : { success: false, error: { type, message, status, timestamp, path } }
+
+    patients-service (errorHandler.js) :
+    - Erreurs de validation PostgreSQL → 400
+    - Erreurs de contrainte unique → 409
+    - Erreurs génériques → 500
+
+    user-service :
+    - Gestion globale dans server.js (uncaughtException, unhandledRejection)
+    - Erreurs Mongoose (ValidationError) → 400
+    - Erreurs JWT → 401
+    - Erreurs d'autorisation → 403
+
+    Proxy (proxies.js) :
+    - onError : service indisponible → 503
+    - Les erreurs des microservices sont transmises telles quelles
+
+═══════════════════════════════════════════════════════════════════════════════
+                   15. INFORMATIONS COMPLÉMENTAIRES
+═══════════════════════════════════════════════════════════════════════════════
+
+15.1 Fichiers .gitignore :
+    - node_modules/ dans tous les services
+    - .env dans certains services (vérifier)
+    - dist/ dans le frontend
+
+15.2 Fichiers README :
+    - Gateway : README.md (présent)
+    - user-service : README.md (présent)
+    - patients-service : pas de README
+    - frontend : README.md + STYLE.md (présents)
+    - consultations-service : pas de README
+
+15.3 Scripts de seed disponibles :
+    - user-service/src/seed.js (utilisateurs de test)
+    - user-service/src/seed-hospitals.js (hôpitaux de test)
+    - user-service/src/migrate-fields.js (migration de champs)
+
+15.4 Tests :
+    - Aucun framework de test n'est installé dans aucun service
+    - Pas de tests unitaires ou d'intégration pour le moment
+
+15.5 Sécurité :
+    - JWT_SECRET doit être changé en production
+    - Les tokens JWT expirent après 24h
+    - Les mots de passe sont hashés avec bcrypt
+    - Rate limiting sur le Gateway (100 req/15min)
+    - Validation côté serveur : email, mot de passe, rôles
+
+════════════════════════════════════════════════════════════════════════════════
+    16. FONCTIONNEMENT GÉNÉRAL — EXPLICATION POUR TOUS
+════════════════════════════════════════════════════════════════════════════════
+
+    Ce qui suit est une explication en langage simple, sans termes
+    techniques compliqués. Elle est destinée à toute personne qui
+    veut comprendre comment fonctionne l'application, même sans
+    être développeur ou informaticien.
+
+
+    Imaginez un grand hôpital. Dans cet hôpital, il y a différents
+    services : le service des ressources humaines qui gère le
+    personnel, le service des dossiers médicaux qui conserve les
+    informations sur les patients, et le service des consultations
+    qui enregistre les visites chez le médecin. Chacun de ces
+    services a son propre système de classement et ses propres
+    dossiers. Dans notre application informatique, c'est exactement
+    la même chose. Il y a un service qui s'appelle user-service et
+    qui s'occupe du personnel : il connaît les médecins, les agents
+    d'accueil et les administrateurs, il gère leurs connexions et
+    leurs mots de passe. Il y a un autre service qui s'appelle
+    patients-service et qui s'occupe des dossiers des malades : il
+    garde leur nom, leur date de naissance, leur numéro de téléphone,
+    leur adresse, et toutes les informations médicales. Et il y a un
+    troisième service, consultation-service, qui est prévu pour
+    gérer les visites médicales mais qui n'est pas encore construit.
+    Le problème, c'est que ces deux premiers services n'utilisent
+    pas le même type de classeur. Le service du personnel utilise
+    un classeur souple appelé MongoDB, où chaque fiche peut contenir
+    des informations différentes selon la personne. Le service des
+    patients utilise un classeur beaucoup plus strict appelé
+    PostgreSQL, qui fonctionne comme un grand tableau Excel avec
+    des colonnes bien définies : chaque patient a obligatoirement
+    un nom, un prénom, une date de naissance, et ainsi de suite.
+    Alors comment faire pour que ces deux services, qui n'ont pas
+    le même classeur et qui ne parlent pas le même langage,
+    puissent travailler ensemble ? La réponse s'appelle le Gateway.
+
+
+    Le Gateway, c'est le standard téléphonique de l'hôpital. Quand
+    vous arrivez à l'hôpital et que vous ne savez pas où aller,
+    vous passez d'abord à l'accueil. La personne à l'accueil vous
+    écoute, vérifie qui vous êtes, et vous indique le bon service.
+    Le Gateway fait exactement ce travail. Il est placé à l'entrée
+    du système, à une adresse précise. Quand une demande arrive,
+    par exemple la demande d'un médecin qui veut créer un nouveau
+    dossier patient, le Gateway commence par vérifier que cette
+    personne a bien le droit d'entrer. Pour cela, il regarde un
+    badge électronique que la personne a reçu au moment de sa
+    connexion, un peu comme le badge que les employés portent
+    autour du cou dans un hôpital. Si le badge est valide, le
+    Gateway transmet la demande au bon service. Il ne fait que
+    trois choses : recevoir la demande, vérifier le badge, et
+    transmettre au bon endroit. Tout passe par lui. C'est le
+    point d'entrée unique.
+
+
+    Parlons maintenant du badge électronique, qu'on appelle token
+    JWT. C'est un petit code secret que le système fabrique au
+    moment où un employé se connecte avec son email et son mot de
+    passe. Ce badge contient l'identité de la personne, son rôle
+    dans l'hôpital, et une date d'expiration. Le badge est valable
+    vingt-quatre heures. Après ce délai, la personne doit se
+    reconnecter pour en obtenir un nouveau. Imaginez que le
+    système possède une machine spéciale pour fabriquer ces badges.
+    Cette machine s'appelle JWT_SECRET. Si quelqu'un de malintentionné
+    met la main sur cette machine, il pourrait fabriquer de faux
+    badges et se faire passer pour n'importe qui. C'est pourquoi
+    cette machine doit être gardée secrète, surtout quand
+    l'application est accessible sur Internet.
+
+
+    Reprenons depuis le début avec un scénario concret. Le docteur
+    Ndiaye arrive le matin à l'hôpital, allume son ordinateur et
+    ouvre son navigateur internet. Il tape l'adresse de l'application
+    et arrive sur la page de connexion. Il tape son adresse email
+    et son mot de passe, puis clique sur le bouton Se connecter.
+    À ce moment-là, son écran envoie un message au Gateway pour
+    lui dire : voici l'email et le mot de passe du docteur Ndiaye,
+    est-ce que c'est correct ? Le Gateway reçoit ce message et le
+    transmet au service du personnel, le user-service. Le user-service
+    reçoit la demande et cherche dans son classeur MongoDB si un
+    employé possède cet email. Il le trouve. Ensuite, il compare
+    le mot de passe que le docteur a tapé avec celui qui est stocké
+    dans son classeur. Pour cette comparaison, il utilise une
+    technique appelée bcrypt, qui est comme une machine à brouiller
+    les mots de passe : on peut vérifier si un mot de passe est
+    correct sans jamais avoir besoin de le connaître réellement.
+    C'est plus sûr. Si le mot de passe est correct, le user-service
+    fabrique un badge électronique pour le docteur Ndiaye, un badge
+    qui dit : je suis le docteur Ndiaye, mon identifiant est le 42,
+    mon rôle est médecin. Ensuite, le user-service envoie un email
+    au docteur Ndiaye pour l'informer que quelqu'un vient de se
+    connecter à son compte, avec la date et l'heure. Puis il renvoie
+    la réponse au Gateway, qui la renvoie à l'écran du docteur.
+    L'écran reçoit le badge, le stocke dans la mémoire du navigateur,
+    et affiche le tableau de bord. Le docteur Ndiaye est maintenant
+    connecté.
+
+
+    Le docteur Ndiaye clique ensuite sur le menu Patients pour
+    voir la liste de ses malades. L'écran envoie une demande au
+    Gateway pour lui demander la liste des patients. Avant de
+    transmettre cette demande, le Gateway vérifie que le docteur
+    possède bien un badge valide. Il regarde dans la mémoire du
+    navigateur si le badge est présent. Il l'est. Alors le Gateway
+    transmet la demande au service des dossiers patients, le
+    patients-service. Ce service interroge sa base de données
+    PostgreSQL et renvoie la liste de tous les patients. La liste
+    s'affiche sur l'écran du docteur.
+
+
+    Le docteur Ndiaye veut maintenant ajouter un nouveau patient.
+    Il clique sur le bouton Nouveau patient. Un formulaire vide
+    apparaît avec des champs à remplir : le nom, le prénom, la
+    date de naissance, le sexe, le numéro de téléphone, les noms
+    des parents et l'adresse. Certains champs sont obligatoires,
+    comme le nom, la date de naissance et le sexe. Le docteur
+    remplit le formulaire. Il tape Ngo comme nom de famille, Jean
+    comme prénom, une date de naissance, homme comme sexe, et un
+    numéro de téléphone. Ensuite, il clique sur le bouton Créer
+    le patient.
+
+
+    Avant de créer le patient, le système vérifie qu'il n'existe
+    pas déjà une personne avec des informations similaires dans la
+    base de données. L'écran envoie une demande au Gateway, qui la
+    transmet au patients-service. Ce service fouille dans PostgreSQL
+    pour trouver tous les patients dont le nom contient Ngo, ou
+    dont le prénom contient Jean, ou qui sont nés à la même date,
+    ou qui ont un numéro de téléphone similaire. Si le système
+    trouve d'autres personnes appelées Ngo dans la base, il les
+    affiche à l'écran avec un message d'avertissement. Le docteur
+    Ndiaye peut alors regarder ces patients pour vérifier s'il ne
+    s'agit pas de la même personne. Il peut cliquer sur l'un d'eux
+    pour voir son dossier complet, il peut revenir au formulaire
+    pour modifier sa saisie, ou il peut décider de créer quand
+    même le nouveau patient s'il est certain qu'il s'agit d'une
+    personne différente.
+
+
+    Si le docteur confirme la création, le patients-service génère
+    un code unique pour le nouveau patient. Ce code commence par
+    P- suivi de huit lettres et chiffres choisis au hasard, par
+    exemple P-A3B7X9K2. Les lettres et les chiffres sont choisis
+    dans un alphabet spécial qui exclut les caractères qui peuvent
+    être confondus quand on les écrit à la main : le I majuscule
+    et le 1 sont exclus, le O et le 0 sont exclus aussi. Le code
+    est donc facile à recopier sur un carnet de santé sans risque
+    d'erreur. Le service enregistre toutes les informations du
+    patient dans PostgreSQL avec ce code unique. Il note également
+    l'identité du docteur qui a créé le dossier. Enfin, il renvoie
+    au Gateway le dossier complet du nouveau patient avec son code.
+    Le Gateway renvoie ces informations à l'écran du docteur, qui
+    affiche automatiquement la page de détail du nouveau patient
+    avec son code bien visible en haut de la page.
+
+
+    Il est important de comprendre que pendant tout ce processus,
+    le service du personnel user-service n'est intervenu qu'au
+    début, pour la connexion. Ensuite, seul le service des dossiers
+    patients a travaillé. Chaque service fait son travail, et le
+    Gateway coordonne l'ensemble.
+
+
+    Mais pourquoi avoir deux services séparés plutôt qu'un seul
+    gros service ? Il y a plusieurs raisons. La première, c'est
+    que les deux services peuvent être modifiés indépendamment.
+    Si on veut changer la façon dont les médecins se connectent,
+    par exemple en ajoutant une reconnaissance digitale, on peut
+    modifier le user-service sans toucher au patients-service.
+    La deuxième raison, c'est que chaque service utilise la
+    technologie la mieux adaptée à son travail : MongoDB est
+    souple et pratique pour la gestion des utilisateurs qui
+    peut évoluer, tandis que PostgreSQL est strict et fiable
+    pour les dossiers médicaux où l'on a besoin de certitude.
+    La troisième raison, c'est la sécurité. Si un pirate
+    informatique parvient à s'introduire dans le service du
+    personnel, il n'a accès qu'aux comptes des employés, pas
+    aux dossiers médicaux des patients. Les données les plus
+    sensibles sont séparées et mieux protégées. La quatrième
+    raison, c'est que la charge de travail est répartie. Si
+    beaucoup de médecins se connectent en même temps le matin
+    à l'ouverture de l'hôpital, seul le service du personnel
+    est sollicité. Le service des patients reste libre pour
+    d'autres tâches. Et la cinquième raison, c'est qu'on peut
+    installer chaque service sur un serveur différent, voire
+    dans des pays différents, pour plus de fiabilité.
+
+
+    Il faut aussi savoir que le service des consultations,
+    consultation-service, n'est pas encore construit. C'est
+    comme un service d'hôpital prévu dans les plans mais pas
+    encore ouvert. Le Gateway a déjà préparé sa porte d'entrée :
+    si quelqu'un essaie d'accéder aux consultations, le Gateway
+    tentera de transmettre la demande mais personne ne répondra,
+    et il renverra un message disant que le service n'est pas
+    disponible. Quand ce service sera construit, il suffira de
+    le démarrer et le Gateway l'acheminera automatiquement sans
+    qu'il soit nécessaire de modifier quoi que ce soit.
+
+
+    Enfin, il y a une différence entre les rôles des utilisateurs.
+    Un médecin peut tout faire : créer des patients, les modifier,
+    et même désactiver un dossier patient si le malade quitte
+    l'hôpital. En revanche, un agent d'accueil peut créer et
+    modifier des patients, mais il ne peut pas désactiver un
+    dossier. Le système l'empêche de deux façons : d'abord,
+    le bouton Désactiver n'apparaît même pas sur son écran,
+    et ensuite, même s'il essayait de le faire en contournant
+    l'écran, le service devrait normalement vérifier son rôle
+    et refuser l'opération. Cette deuxième vérification au
+    niveau du service est une amélioration qui reste à mettre
+    en place pour une sécurité renforcée.
+
+
+════════════════════════════════════════════════════════════════════════════════
+                  17. RECOMMANDATIONS ET ÉVOLUTIONS POSSIBLES
+═══════════════════════════════════════════════════════════════════════════════
+
+    Immédiates :
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ 1. Implémenter le consultation-service (CRUD consultations)         │
+    │ 2. Ajouter des tests unitaires et d'intégration                    │
+    │ 3. Ajouter des fichiers .gitignore cohérents dans tous les services │
+    │ 4. Centraliser les définitions de rôles (actuellement dupliquées)   │
+    └─────────────────────────────────────────────────────────────────────┘
+
+    Court terme :
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ 1. Ajouter un système de logging centralisé (Winston/Pino)         │
+    │ 2. Implémenter le refresh token pour l'authentification            │
+    │ 3. Ajouter un cache Redis pour les tokens et données fréquentes    │
+    │ 4. Filtrer les patients inactifs dans la liste (option toggle)     │
+    └─────────────────────────────────────────────────────────────────────┘
+
+    Moyen terme :
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ 1. Conteneuriser avec Docker (Dockerfile + docker-compose)         │
+    │ 2. Ajouter un service de notification (WhatsApp/SMS)               │
+    │ 3. Dashboard avec vraies statistiques (pas de mock)                │
+    │ 4. Gestion des rendez-vous (agenda médical)                        │
+    └─────────────────────────────────────────────────────────────────────┘
+
+═══════════════════════════════════════════════════════════════════════════════
+                    18. STRUCTURE COMPLÈTE DES DOSSIERS
+═══════════════════════════════════════════════════════════════════════════════
+
+Getway/
+├── .env
+├── package.json
+├── src/
+│   ├── server.js
+│   ├── config/
+│   │   └── proxies.js
+│   └── middlewares/
+│       ├── auth.js
+│       ├── errorHandler.js
+│       ├── logger.js
+│       └── rateLimiter.js
+
+user-service/
+├── .env
+├── package.json
+├── render.yaml
+├── src/
+│   ├── server.js
+│   ├── seed.js
+│   ├── seed-hospitals.js
+│   ├── migrate-fields.js
+│   ├── config/
+│   │   └── db.js
+│   ├── controllers/
+│   │   ├── hospital.controller.js
+│   │   └── user.controller.js
+│   ├── middlewares/
+│   │   ├── auth.middleware.js
+│   │   └── role.middleware.js
+│   ├── models/
+│   │   ├── hospital.model.js
+│   │   └── user.model.js
+│   ├── routes/
+│   │   ├── hospital.routes.js
+│   │   └── user.routes.js
+│   ├── services/
+│   │   ├── auth.service.js
+│   │   └── email.service.js
+│   └── utils/
+│       └── generateToken.js
+
+patients-service/
+├── .env
+├── package.json
+├── render.yaml
+├── src/
+│   ├── server.js
+│   ├── config/
+│   │   └── db.js
+│   ├── controllers/
+│   │   └── patient.controller.js
+│   ├── middlewares/
+│   │   ├── auth.middleware.js
+│   │   └── errorHandler.js
+│   ├── routes/
+│   │   └── patient.routes.js
+│   └── services/
+│       └── patient.service.js
+
+consultations-service/
+├── package.json
+└── (src/ à créer - NON IMPLÉMENTÉ)
+
+frontend/
+├── .env
+├── package.json
+├── vite.config.js
+├── index.html
+├── public/
+│   ├── favicon.svg
+│   └── icons.svg
+└── src/
+    ├── main.jsx
+    ├── App.jsx
+    ├── index.css
+    ├── api/
+    │   ├── axios.js
+    │   ├── consultationApi.js
+    │   ├── hospitalApi.js
+    │   ├── patientApi.js
+    │   └── userApi.js
+    ├── components/
+    │   ├── ProtectedRoute.jsx
+    │   ├── SearchableSelect.jsx
+    │   └── layout/
+    │       ├── AppLayout.jsx
+    │       ├── Navbar.jsx
+    │       └── Sidebar.jsx
+    ├── context/
+    │   └── AuthContext.jsx
+    ├── pages/
+    │   ├── ChangePassword.jsx
+    │   ├── Dashboard.jsx
+    │   ├── Landing.jsx
+    │   ├── Login.jsx
+    │   ├── Consultations/
+    │   │   ├── ConsultationList.jsx
+    │   │   ├── CreateConsultation.jsx
+    │   │   └── EditConsultation.jsx
+    │   ├── Patients/
+    │   │   ├── CreatePatient.jsx
+    │   │   ├── EditPatient.jsx
+    │   │   ├── PatientDetail.jsx
+    │   │   └── PatientList.jsx
+    │   └── Users/
+    │       ├── CreateUser.jsx
+    │       ├── EditUser.jsx
+    │       └── UserList.jsx
+    ├── routes/
+    │   └── AppRoutes.jsx
+    └── utils/
+        └── roleHelpers.js
+
+═══════════════════════════════════════════════════════════════════════════════
+                    19. FICHIERS DE DOCUMENTATION EXISTANTS
+═══════════════════════════════════════════════════════════════════════════════
+
+    - Getway/README.md         : Documentation du Gateway
+    - Getway/CLAUDE.md         : Prompt de génération du Gateway
+    - user-service/README.md   : Documentation du user-service
+    - user-service/CLAUDE.md   : Prompt de génération du user-service
+    - frontend/README.md       : Documentation du frontend
+    - frontend/CLAUDE.md       : Prompt de génération du frontend
+    - frontend/STYLE.md        : Guide de style du frontend
+
+═══════════════════════════════════════════════════════════════════════════════
+                   20. PORTS RÉSERVÉS PAR SERVICE
+═══════════════════════════════════════════════════════════════════════════════
+
+    ┌─────────────────────┬────────┬────────────────────────────────┐
+    │ Service             │ Port   │ Accès                          │
+    ├─────────────────────┼────────┼────────────────────────────────┤
+    │ Gateway             │ 3000   │ http://localhost:3000          │
+    │ user-service        │ 3001   │ http://localhost:3001          │
+    │ patients-service    │ 3002   │ http://localhost:3002          │
+    │ consultation-service│ 3003   │ http://localhost:3003 (stub)   │
+    │ Frontend (dev)      │ 5173   │ http://localhost:5173          │
+    │ PostgreSQL          │ 5432   │ localhost:5432                 │
+    │ MongoDB Atlas       │ 27017  │ Cluster MongoDB cloud          │
+    └─────────────────────┴────────┴────────────────────────────────┘
+
+═══════════════════════════════════════════════════════════════════════════════
+                  21. HISTORIQUE DES ÉVOLUTIONS RÉCENTES
+═══════════════════════════════════════════════════════════════════════════════
+
+    04/06/2026 - Correction des warnings d'index dupliqué Mongoose
+               - Suppression des schémas d'index redondants
+
+    04/06/2026 - Ajout de la détection des doublons patients
+               - Nouvelle route POST /check-duplicates
+               - Alerte modale dans CreatePatient
+
+    04/06/2026 - Correction du pathRewrite du Gateway
+               - Support des query strings dans les proxys
+
+    04/06/2026 - Ajout de la colonne code_patient avec génération auto
+               - Format : P-XXXXXXXX (alphabet sans ambiguïté)
+
+    04/06/2026 - Ajout de la colonne actif avec désactivation/réactivation
+               - Réservé au rôle MEDECIN
+               - Routes PUT /:id/desactiver et /:id/reactiver
+
+═══════════════════════════════════════════════════════════════════════════════
+                         FIN DU RAPPORT TECHNIQUE
+═══════════════════════════════════════════════════════════════════════════════

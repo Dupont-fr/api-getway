@@ -97,6 +97,77 @@ app.use(express.json())
 app.use(express.urlencoded({ extended: true }))
 
 // ============================================
+// Routes Statistiques & Reporting
+// ============================================
+
+/**
+ * Route de statistiques hospitalières
+ * Données mockées pour le dashboard
+ */
+app.get('/api/statistique', authMiddleware, (req, res) => {
+  res.json({
+    success: true,
+    data: {
+      hopitaux: {
+        total: 3,
+        actifs: 3,
+        services: ['Cardiologie', 'Urgences', 'Pédiatrie', 'Radiologie', 'Chirurgie'],
+      },
+      utilisateurs: {
+        total: 25,
+        parRole: { ADMIN: 2, MEDECIN: 12, ACCUEIL: 11 },
+      },
+      patients: {
+        total: 150,
+        nouveauxCeMois: 12,
+      },
+      consultations: {
+        total: 890,
+        ceMois: 45,
+        moyenneParJour: 15,
+      },
+      period: '2026-06',
+    },
+  })
+})
+
+/**
+ * GET /api/statistique/hopitaux/:id
+ * Statistiques détaillées d'un hôpital
+ */
+app.get('/api/statistique/hopitaux/:id', authMiddleware, (req, res) => {
+  res.json({
+    success: true,
+    data: {
+      hopital: req.params.id,
+      occupation: { lits: 45, disponibles: 12, taux: 0.79 },
+      consultations: 290,
+      medecins: 8,
+      patients: 60,
+    },
+  })
+})
+
+/**
+ * POST /api/statistique/rapport
+ * Générer un rapport personnalisé
+ */
+app.post('/api/statistique/rapport', authMiddleware, (req, res) => {
+  const { type, hopital, dateDebut, dateFin } = req.body
+  res.json({
+    success: true,
+    message: 'Rapport généré avec succès',
+    data: {
+      type: type || 'general',
+      hopital: hopital || 'tous',
+      periode: { dateDebut, dateFin },
+      status: 'en_cours',
+      url: `/api/statistique/rapport/${Date.now()}`,
+    },
+  })
+})
+
+// ============================================
 // Routes de l'API Gateway
 // ============================================
 
@@ -130,6 +201,7 @@ app.get('/', (req, res) => {
       users: '/api/users',
       patients: '/api/patients',
       consultations: '/api/consultations',
+      statistiques: '/api/statistique',
     },
   })
 })
@@ -155,6 +227,11 @@ app.listen(PORT, HOST, () => {
   console.log(
     `   - /api/consultations → ${process.env.CONSULTATION_SERVICE_URL}`,
   )
+  console.log(`   - /api/statistique → Statistiques & Reporting (intégré)`)
+  console.log(
+    `   - /api/statistique/hopitaux/:id → Statistiques par hôpital`,
+  )
+  console.log(`   - POST /api/statistique/rapport → Générer un rapport`)
   console.log(
     `🔐 JWT Secret: ${process.env.JWT_SECRET ? 'Configuré' : 'NON CONFIGURÉ'}`,
   )
