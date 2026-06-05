@@ -23,6 +23,7 @@ const logger = require('./middlewares/logger')
 const errorHandler = require('./middlewares/errorHandler')
 const authMiddleware = require('./middlewares/auth')
 const rateLimiter = require('./middlewares/rateLimiter')
+const { startKeepAlive } = require('./utils/keepalive')
 
 // Importation de la configuration des proxys
 const proxyConfig = require('./config/proxies')
@@ -236,6 +237,9 @@ app.listen(PORT, HOST, () => {
     `🔐 JWT Secret: ${process.env.JWT_SECRET ? 'Configuré' : 'NON CONFIGURÉ'}`,
   )
 })
+
+// Keepalive pour éviter le sommeil Render (free tier)
+startKeepAlive()
 
 // Export pour les tests
 module.exports = app
