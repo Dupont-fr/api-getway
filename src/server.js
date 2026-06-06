@@ -22,7 +22,6 @@ const { createProxyMiddleware } = require('http-proxy-middleware')
 const logger = require('./middlewares/logger')
 const errorHandler = require('./middlewares/errorHandler')
 const authMiddleware = require('./middlewares/auth')
-const rateLimiter = require('./middlewares/rateLimiter')
 const { startKeepAlive } = require('./utils/keepalive')
 
 // Importation de la configuration des proxys
@@ -45,9 +44,6 @@ app.use(cors())
 
 // Middleware de logging - Affiche les requêtes entrantes
 app.use(logger)
-
-// Middleware de limitatation de requêtes (rate limiting)
-app.use(rateLimiter)
 
 // ============================================
 // Configuration des proxys vers les microservices
