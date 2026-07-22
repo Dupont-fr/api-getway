@@ -1,0 +1,1366 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                                                                            ║
+║              RAPPORT TECHNIQUE - API GATEWAY & MICROSERVICES               ║
+║              Application de Gestion Hospitalière (MediSys)                 ║
+║                                                                            ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+Date du rapport : 18/07/2026
+Projet : Software As Service
+Architecture : Microservices avec API Gateway
+
+═══════════════════════════════════════════════════════════════════════════════
+                        1. ARCHITECTURE GÉNÉRALE
+═══════════════════════════════════════════════════════════════════════════════
+
+                         ┌─────────────────────┐
+                         │     FRONTEND        │
+                         │  React + Vite 8     │
+                         │http://localhost:5173 │
+                         └──────────┬──────────┘
+                                    │
+                                    │ HTTPS (Axios)
+                                    ▼
+                         ┌─────────────────────┐
+                         │   API GATEWAY       │
+                         │   Port 3000         │
+                         │   Express + Proxy   │
+                         └──┬──────┬──────┬────┘
+                            │      │      │
+               ┌────────────┘      │      └────────────┐
+               ▼                   ▼                   ▼
+     ┌─────────────────┐  ┌──────────────┐  ┌──────────────────┐
+     │  USER-SERVICE   │  │PATIENT-SERV. │  │CONSULTATION-SERV.│
+     │  Port 3001      │  │  Port 3002   │  │  Port 3003       │
+     │  MongoDB Atlas  │  │  PostgreSQL  │  │  PostgreSQL      │
+     │  Auth + Emails  │  │  Patients    │  │  Consultations   │
+     │  Password Reset │  │  Antécédents │  │  Transferts      │
+     └─────────────────┘  └──────────────┘  └──────────────────┘
+                                                      │
+                                                      ▼
+                                             ┌──────────────────┐
+                                             │ STATISTICS-SERV. │
+                                             │  Port 3004       │
+                                             │  PostgreSQL      │
+                                             │  Dashboard stats │
+                                             └──────────────────┘
+
+
+═══════════════════════════════════════════════════════════════════════════════
+                   2. API GATEWAY (Getway/)
+═══════════════════════════════════════════════════════════════════════════════
+
+2.1 Emplacement : /Getway
+2.2 Technologies :
+    - Node.js (v22)
+    - Express 4.21
+    - http-proxy-middleware 2.0.7
+    - jsonwebtoken 9.0.3
+    - express-rate-limit 7.4.0
+    - dotenv 16.6.1
+    - cors 2.8.5
+
+2.3 Fichiers de configuration :
+    - .env                    Variables d'environnement
+    - package.json            Dépendances et scripts
+    - src/server.js           Point d'entrée principal
+    - src/config/proxies.js   Configuration des proxys
+    - src/middlewares/auth.js Authentification JWT
+    - src/middlewares/logger.js  Logging des requêtes
+    - src/middlewares/rateLimiter.js  Limitation de débit
+    - src/middlewares/errorHandler.js  Gestion des erreurs
+
+2.4 .env (Getway)
+    ┌─────────────────────────────────────────────────────┐
+    │ PORT=3000                                            │
+    │ HOST=localhost                                       │
+    │ NODE_ENV=development                                 │
+    │ USER_SERVICE_URL=http://localhost:3001               │
+    │ PATIENT_SERVICE_URL=http://localhost:3002            │
+    │ CONSULTATION_SERVICE_URL=http://localhost:3003       │
+    │ STATISTICS_SERVICE_URL=http://localhost:3004         │
+    │ JWT_SECRET=dev-secret-key-change-in-production       │
+    │ RATE_LIMIT_WINDOW_MS=900000                          │
+    │ RATE_LIMIT_MAX_REQUESTS=1000                         │
+    └─────────────────────────────────────────────────────┘
+
+2.5 Routage des proxys :
+
+    ┌──────────────────────┬──────────────────┬──────────────────────┐
+    │ URL Gateway          │ Cible            │ Service              │
+    ├──────────────────────┼──────────────────┼──────────────────────┤
+    │ /api/users/*         │ localhost:3001/* │ user-service         │
+    │ /api/patients/*      │ localhost:3002/* │ patients-service     │
+    │ /api/consultations/* │ localhost:3003/* │ consultation-service │
+    │ /api/statistics/*    │ localhost:3004/* │ statistics-service   │
+    └──────────────────────┴──────────────────┴──────────────────────┘
+
+    Les proxys utilisent pathRewrite pour supprimer le préfixe
+    (ex: /api/users/login → /login) avant de transmettre la requête.
+
+2.6 Middleware applicatif (ordre d'exécution) :
+    1. cors()                         - CORS headers
+    2. logger                         - Journalisation
+    3. rateLimiter                    - Rate limiting (1000 req/15min)
+    4. auth (sur chaque proxy)        - Vérification JWT
+    5. errorHandler                   - Gestion globale erreurs
+
+2.7 Routes publiques (sans authentification) :
+    - GET  /health                    - Health check
+    - GET  /                          - Page d'accueil API
+    - POST /api/users/login           - Connexion
+    - POST /api/users/forgot-password - Demande réinitialisation mot de passe
+    - POST /api/users/register/admin  - Bootstrap admin (uniquement si aucun admin)
+
+2.8 Middleware d'authentification (auth.js) :
+    - Vérifie le header "Authorization: Bearer <token>"
+    - En développement (NODE_ENV=development) : sautée
+    - En production : jwt.verify(token, JWT_SECRET)
+    - routesPubliques : login, register, forgot-password, register/admin
+    - Exporte requireRole(...roles) pour les vérifications de rôle
+
+2.9 Limitation de débit (rateLimiter.js) :
+    - Fenêtre : 15 minutes (configurable via RATE_LIMIT_WINDOW_MS)
+    - Maximum : 1000 requêtes par fenêtre
+    - Réponse : 429 JSON
+
+═══════════════════════════════════════════════════════════════════════════════
+                     3. USER-SERVICE (user-service/)
+═══════════════════════════════════════════════════════════════════════════════
+
+3.1 Emplacement : /user-service
+3.2 Technologies :
+    - Express 4.18
+    - MongoDB avec Mongoose 8.0
+    - bcryptjs 2.4 (hash des mots de passe)
+    - jsonwebtoken 9.0
+    - nodemailer 8.0 (emails via Brevo/SendinBlue)
+
+3.3 Base de données : MongoDB (Atlas cloud)
+    - URI : mongodb+srv://dupontdjeague:dupont@cluster0.t2xncq8.mongodb.net/Hospital
+    - Driver : Mongoose 8.0
+
+3.4 Structure des collections :
+
+    Collection "users" :
+    ┌────────────────────────┬──────────────┬─────────────────────────────┐
+    │ Champ                  │ Type         │ Contrainte                 │
+    ├────────────────────────┼──────────────┼─────────────────────────────┤
+    │ nameUser               │ String       │ Requis, min 2 caractères   │
+    │ emailUser              │ String       │ Requis, unique, lowercase  │
+    │ passwordUser           │ String       │ Requis, min 8, select:false│
+    │ roleUser               │ Enum         │ ADMIN/MEDECIN/ACCUEIL      │
+    │ mustChangePasswordUser │ Boolean      │ Défaut: false              │
+    │ hospitalUser           │ String       │ Référence à l'hôpital     │
+    │ specialtyUser          │ String       │ Spécialité médicale        │
+    │ createdAtUser          │ Date         │ Défaut: Date.now           │
+    └────────────────────────┴──────────────┴─────────────────────────────┘
+
+    Collection "hospitals" :
+    ┌─────────────────────┬──────────────┬─────────────────────────────┐
+    │ Champ               │ Type         │ Contrainte                 │
+    ├─────────────────────┼──────────────┼─────────────────────────────┤
+    │ nameHospital        │ String       │ Requis, unique             │
+    │ servicesHospital    │ [String]     │ Liste des services         │
+    └─────────────────────┴──────────────┴─────────────────────────────┘
+
+    Collection "passwordresetrequests" :
+    ┌─────────────────────┬──────────────┬─────────────────────────────┐
+    │ Champ               │ Type         │ Contrainte                 │
+    ├─────────────────────┼──────────────┼─────────────────────────────┤
+    │ email               │ String       │ Requis                     │
+    │ status              │ Enum         │ pending/approved/rejected  │
+    │ requestedAt         │ Date         │ Défaut: Date.now           │
+    │ reviewedAt          │ Date         │ Optionnel                  │
+    │ reviewedBy          │ ObjectId     │ Référence à l'admin       │
+    └─────────────────────┴──────────────┴─────────────────────────────┘
+
+3.5 Rôles disponibles :
+    ┌──────────┬──────────────────────────────────────────────────┐
+    │ Rôle     │ Permissions                                      │
+    ├──────────┼──────────────────────────────────────────────────┤
+    │ ADMIN    │ Gestion complète des utilisateurs + vue globale  │
+    │ MEDECIN  │ Consultation, patients, soins médicaux           │
+    │ ACCUEIL  │ Création/recherche patients, accueil             │
+    └──────────┴──────────────────────────────────────────────────┘
+
+3.6 API exposée (via le Gateway : /api/users/...) :
+
+    ┌──────────┬──────────────────────────────┬────────────────────────┐
+    │ Méthode  │ Endpoint                     │ Accès                  │
+    ├──────────┼──────────────────────────────┼────────────────────────┤
+    │ POST     │ /login                       │ Public                 │
+    │ POST     │ /register                    │ Admin                  │
+    │ POST     │ /register/admin              │ Public (bootstrap)     │
+    │ POST     │ /change-password             │ Authentifié            │
+    │ POST     │ /forgot-password             │ Public                 │
+    │ GET      │ /password-reset-requests     │ Admin                  │
+    │ PUT      │ /password-reset-requests/:id/approve │ Admin          │
+    │ PUT      │ /password-reset-requests/:id/reject  │ Admin          │
+    │ GET      │ /users                       │ Admin                  │
+    │ GET      │ /users/:id                   │ Admin, Médecin         │
+    │ PUT      │ /users/:id                   │ Admin                  │
+    │ DELETE   │ /users/:id                   │ Admin                  │
+    │ GET      │ /hospitals                   │ Authentifié            │
+    │ GET      │ /hospitals/:id               │ Authentifié            │
+    │ POST     │ /hospitals                   │ Admin                  │
+    └──────────┴──────────────────────────────┴────────────────────────┘
+
+3.7 Fonctionnalités notables :
+    - Hash bcrypt (salt rounds: 10) avec hook pre('save')
+    - Génération et vérification JWT (24h d'expiration)
+    - Envoi d'emails transactionnels via Brevo (inscription,
+      notification de connexion, changement de mot de passe,
+      demande de réinitialisation, approbation/rejet)
+    - Workflow complet de réinitialisation de mot de passe :
+      Demande → Notification admin → Approbation/Rejet → Email utilisateur
+    - Validation de la force du mot de passe (majuscule, minuscule,
+      chiffre, caractère spécial, min 8 caractères)
+    - JWT enrichi : id, email, roleUser, nameUser, hospitalUser, specialtyUser
+    - Seed scripts disponibles : seed.js, seed-hospitals.js
+
+3.8 Variables d'environnement importantes :
+    - BREVO_API_KEY : clé API Brevo pour l'envoi d'emails
+    - BREVO_SENDER_EMAIL : expéditeur des emails (dupontdjeague@gmail.com)
+    - FRONTEND_URL : https://medi-camer.vercel.app
+    - SUPPORT_EMAIL : dupontdjeague@gmail.com
+
+═══════════════════════════════════════════════════════════════════════════════
+                   4. PATIENTS-SERVICE (patients-service/)
+═══════════════════════════════════════════════════════════════════════════════
+
+4.1 Emplacement : /patients-service
+4.2 Technologies :
+    - Express 5.2
+    - PostgreSQL avec pg 8.13
+    - jsonwebtoken 9.0
+    - crypto (génération de codes patients)
+
+4.3 Base de données : PostgreSQL locale
+    - URL : postgresql://postgres:dupont@localhost:5432/patients
+    - Host : localhost
+    - Port : 5432
+    - Database : patients
+    - User : postgres
+    - Password : dupont
+
+4.4 Structure de la table "patients" :
+    ┌───────────────────────┬──────────────┬────────────────────────────┐
+    │ Champ                 │ Type         │ Contrainte                │
+    ├───────────────────────┼──────────────┼────────────────────────────┤
+    │ id                    │ SERIAL       │ PRIMARY KEY               │
+    │ code_patient          │ VARCHAR(20)  │ UNIQUE                    │
+    │ prenom_patient        │ VARCHAR(255) │ Optionnel                 │
+    │ nom_patient           │ VARCHAR(255) │ NOT NULL                  │
+    │ date_naissance_patient│ DATE         │ NOT NULL                  │
+    │ genre_patient         │ VARCHAR(10)  │ CHECK (Homme/Femme)      │
+    │ telephone_patient     │ VARCHAR(50)  │ Optionnel, 9 chiffres    │
+    │ nom_pere              │ VARCHAR(255) │ Optionnel                 │
+    │ nom_mere              │ VARCHAR(255) │ Optionnel                 │
+    │ adresse_rue           │ VARCHAR(255) │ Optionnel                 │
+    │ adresse_ville         │ VARCHAR(255) │ Optionnel                 │
+    │ adresse_code_postal   │ VARCHAR(20)  │ Optionnel                 │
+    │ religion              │ VARCHAR(100) │ Optionnel                 │
+    │ situation_matrimoniale│ VARCHAR(50)  │ Optionnel                 │
+    │ pays                  │ VARCHAR(100) │ Optionnel (défaut Cameroun)│
+    │ lieu_naissance        │ VARCHAR(255) │ Optionnel                 │
+    │ groupe_sanguin        │ VARCHAR(5)   │ Optionnel (A/B/AB/O)     │
+    │ rhesus                │ VARCHAR(10)  │ Optionnel (Positif/Negatif)│
+    │ profession            │ VARCHAR(255) │ Optionnel                 │
+    │ hopital               │ VARCHAR(255) │ Optionnel                 │
+    │ created_by            │ VARCHAR(255) │ ID de l'utilisateur      │
+    │ actif                 │ BOOLEAN      │ DEFAULT true              │
+    │ created_at            │ TIMESTAMP    │ DEFAULT CURRENT_TIMESTAMP │
+    │ updated_at            │ TIMESTAMP    │ DEFAULT CURRENT_TIMESTAMP │
+    └───────────────────────┴──────────────┴────────────────────────────┘
+
+    Table "antecedents" :
+    ┌───────────────────────┬──────────────┬────────────────────────────┐
+    │ Champ                 │ Type         │ Contrainte                │
+    ├───────────────────────┼──────────────┼────────────────────────────┤
+    │ id                    │ SERIAL       │ PRIMARY KEY               │
+    │ patient_id            │ INTEGER      │ FK → patients(id)        │
+    │ type                  │ VARCHAR(50)  │ medical/allergie/familial│
+    │ description           │ TEXT         │ NOT NULL                  │
+    │ date_antecedent       │ DATE         │ Optionnel                 │
+    │ hopital               │ VARCHAR(255) │ Hôpital créateur          │
+    │ created_by            │ VARCHAR(255) │ ID créateur              │
+    │ created_at            │ TIMESTAMP    │ DEFAULT CURRENT_TIMESTAMP │
+    │ updated_at            │ TIMESTAMP    │ DEFAULT CURRENT_TIMESTAMP │
+    └───────────────────────┴──────────────┴────────────────────────────┘
+
+4.5 API exposée (via le Gateway : /api/patients/...) :
+
+    ┌──────────┬──────────────────────────────┬──────────────────────────┐
+    │ Méthode  │ Endpoint                     │ Description              │
+    ├──────────┼──────────────────────────────┼──────────────────────────┤
+    │ GET      │ /                            │ Liste paginée + filtre   │
+    │ GET      │ /:id                         │ Détail d'un patient     │
+    │ POST     │ /                            │ Création d'un patient   │
+    │ PUT      │ /:id                         │ Modification             │
+    │ DELETE   │ /:id                         │ Suppression physique     │
+    │ POST     │ /check-duplicates            │ Vérification doublons   │
+    │ PUT      │ /:id/desactiver              │ Désactiver (MEDECIN)    │
+    │ PUT      │ /:id/reactiver               │ Réactiver (MEDECIN)     │
+    │ GET      │ /:id/antecedents             │ Liste antécédents       │
+    │ POST     │ /:id/antecedents             │ Ajouter antécédent      │
+    │ PUT      │ /antecedents/:id             │ Modifier antécédent     │
+    │ DELETE   │ /antecedents/:id             │ Supprimer antécédent    │
+    └──────────┴──────────────────────────────┴──────────────────────────┘
+
+    Paramètres de recherche (GET /) :
+    - search : recherche ILIKE sur nom, prénom, code, téléphone
+    - hopital : filtre par hôpital (injecté depuis JWT pour non-ADMIN)
+    - page : numéro de page (défaut: 1)
+    - limit : nombre par page (défaut: 50)
+
+4.6 Génération automatique du code patient :
+    Format : P-XXXXXXXX (préfixe P- + 8 caractères)
+    Alphabet : ABCDEFGHJKLMNPQRSTUVWXYZ23456789
+    (exclut I, O, 0, 1 pour éviter les ambiguïtés)
+    5 tentatives max en cas de collision UNIQUE
+
+4.7 Détection des doublons (POST /check-duplicates) :
+    Critères de correspondance (OU logique) :
+    - nom_patient ILIKE '%saisie%' (partiel)
+    - prenom_patient ILIKE '%saisie%' (partiel)
+    - date_naissance_patient = date saisie (exact)
+    - téléphone après nettoyage (chiffres seuls, ILIKE %...%)
+
+    Réponse enrichie : chaque doublon retourne un tableau matchedFields
+    indiquant précisément quels champs correspondent :
+    ["lastName", "firstName", "dateOfBirth", "phone"]
+
+4.8 Filtre par hôpital (sécurité) :
+    - Les utilisateurs non-ADMIN ne voient que les patients de leur hôpital
+    - Le champ hopital est injecté automatiquement depuis le JWT
+    - La modification/suppression/désactivation/réactivation est
+      bloquée (403) si l'hôpital ne correspond pas
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                                                                            ║
+║   NOTE IMPORTANTE : CHIFFREMENT AES-256-GCM                                ║
+║                                                                            ║
+║   Les champs sensibles des consultations suivants sont chiffrés            ║
+║   avec AES-256-GCM côté serveur avant insertion en base :                 ║
+║   - motif_consultation                                                     ║
+║   - observations                                                           ║
+║   - conclusion                                                             ║
+║   - decision                                                               ║
+║   - prescription                                                           ║
+║                                                                            ║
+║   La clé de chiffrement est définie via ENCRYPTION_KEY dans .env           ║
+║   (64 caractères hexadécimaux = 32 bytes).                                 ║
+║   Ne pas perdre cette clé → données illisibles définitivement.             ║
+║   Ne pas changer la clé après chiffrement → impossible de déchiffrer.      ║
+║                                                                            ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+═══════════════════════════════════════════════════════════════════════════════
+                 5. CONSULTATION-SERVICE (consultations-service/)
+═══════════════════════════════════════════════════════════════════════════════
+
+5.1 Emplacement : /consultations-service
+5.2 Technologies :
+    - Express 5.2
+    - PostgreSQL avec pg 8.21
+    - jsonwebtoken 9.0
+    - crypto (chiffrement AES-256-GCM)
+
+5.3 Base de données : PostgreSQL
+    Même base que patients-service (patients)
+    Tables : consultations, consultation_interventions
+
+5.4 Structure de la table "consultations" :
+    ┌───────────────────────┬──────────────┬────────────────────────────┐
+    │ Champ                 │ Type         │ Contrainte                │
+    ├───────────────────────┼──────────────┼────────────────────────────┤
+    │ id                    │ SERIAL       │ PRIMARY KEY               │
+    │ patient_id            │ INTEGER      │ FK → patients(id)        │
+    │ consultation_date     │ DATE         │ NOT NULL                  │
+    │ motif_consultation    │ TEXT         │ CHIFFRÉ                   │
+    │ poids                 │ VARCHAR(20)  │ Optionnel                 │
+    │ taille                │ VARCHAR(20)  │ Optionnel                 │
+    │ temperature           │ VARCHAR(20)  │ Optionnel                 │
+    │ tension               │ VARCHAR(20)  │ Optionnel                 │
+    │ observations          │ TEXT         │ CHIFFRÉ                   │
+    │ conclusion            │ TEXT         │ CHIFFRÉ                   │
+    │ decision              │ TEXT         │ CHIFFRÉ                   │
+    │ prescription          │ TEXT         │ CHIFFRÉ                   │
+    │ doctor_id             │ VARCHAR(255) │ ID du médecin créateur    │
+    │ doctor_name           │ VARCHAR(255) │ Nom du médecin            │
+    │ doctor_specialty      │ VARCHAR(255) │ Spécialité médicale       │
+    │ doctor_hospital       │ VARCHAR(255) │ Hôpital du médecin        │
+    │ statut                │ VARCHAR(50)  │ en_attente/complete/      │
+    │                       │              │ annulee/transferee       │
+    │ contact_urgence_nom   │ VARCHAR(255) │ Optionnel                 │
+    │ contact_urgence_telephone │ VARCHAR(50) │ Optionnel              │
+    │ transfert_depuis      │ VARCHAR(255) │ Hôpital source transfert │
+    │ transfert_vers        │ VARCHAR(255) │ Hôpital destination      │
+    │ transfert_par         │ VARCHAR(255) │ Médecin ayant transféré  │
+    │ transfert_le          │ TIMESTAMP    │ Date du transfert        │
+    │ created_by            │ VARCHAR(255) │ ID créateur              │
+    │ created_at            │ TIMESTAMP    │ DEFAULT CURRENT_TIMESTAMP│
+    │ updated_at            │ TIMESTAMP    │ DEFAULT CURRENT_TIMESTAMP│
+    └───────────────────────┴──────────────┴────────────────────────────┘
+
+    Table "consultation_interventions" :
+    ┌───────────────────────┬──────────────┬────────────────────────────┐
+    │ Champ                 │ Type         │ Contrainte                │
+    ├───────────────────────┼──────────────┼────────────────────────────┤
+    │ id                    │ SERIAL       │ PRIMARY KEY               │
+    │ consultation_id       │ INTEGER      │ FK → consultations(id)   │
+    │ doctor_id             │ VARCHAR(255) │ ID du médecin             │
+    │ doctor_name           │ VARCHAR(255) │ Nom du médecin            │
+    │ doctor_specialty      │ VARCHAR(255) │ Spécialité                │
+    │ doctor_hospital       │ VARCHAR(255) │ Hôpital                   │
+    │ action                │ VARCHAR(50)  │ creation/prise_en_charge/ │
+    │                       │              │ modification              │
+    │ changes               │ JSONB        │ Détail des modifications  │
+    │ created_at            │ TIMESTAMP    │ DEFAULT CURRENT_TIMESTAMP │
+    └───────────────────────┴──────────────┴────────────────────────────┘
+
+5.5 API exposée (via le Gateway : /api/consultations/...) :
+
+    ┌──────────┬──────────────────────────────┬──────────────────────────┐
+    │ Méthode  │ Endpoint                     │ Description              │
+    ├──────────┼──────────────────────────────┼──────────────────────────┤
+    │ GET      │ /                            │ Liste paginée + filtres │
+    │ GET      │ /:id                         │ Détail avec interventions│
+    │ POST     │ /                            │ Création consultation   │
+    │ PUT      │ /:id                         │ Modification + traçage  │
+    │ DELETE   │ /:id                         │ Suppression             │
+    │ PUT      │ /:id/transfer                │ Transfert inter-hôpital │
+    └──────────┴──────────────────────────────┴──────────────────────────┘
+
+    Filtres disponibles (GET /) :
+    - patientId : filtre par patient
+    - doctorId : consultations du médecin (y compris interventions)
+    - doctorHospital : filtre par hôpital (injecté depuis JWT)
+    - doctorSpecialty : filtre par spécialité (vérifié dans interventions)
+    - page / limit : pagination
+
+5.6 Fonctionnalités notables :
+    - Chiffrement AES-256-GCM des 5 champs sensibles
+    - Déchiffrement automatique dans formatRow() au moment de la lecture
+    - Traçage complet des interventions (qui a modifié quoi, quand)
+    - Vérification de conflit : un champ déjà rempli par un autre médecin
+      ne peut pas être modifié
+    - Transfert inter-hôpital avec conservation de l'historique
+    - Filtrage par spécialité (vérifié dans la consultation ET les interventions)
+    - Rôle ACCUEIL : ne voit pas le contenu médical (champs supprimés
+      par stripSensitiveFields() dans le contrôleur)
+
+5.7 Transfert d'une consultation :
+    - L'originale passe en statut "transferee" avec transfert_vers renseigné
+    - Une copie complète est créée dans l'hôpital de destination
+    - Réservé au rôle MEDECIN (vérification côté serveur)
+    - Les interventions sont copiées dans la nouvelle consultation
+
+═══════════════════════════════════════════════════════════════════════════════
+                 6. STATISTICS-SERVICE (statistics-service/)
+═══════════════════════════════════════════════════════════════════════════════
+
+6.1 Emplacement : /statistics-service
+6.2 Technologies :
+    - Express 5.2
+    - PostgreSQL avec pg 8.13
+    - MongoDB avec Mongoose 8.9
+    - jsonwebtoken 9.0
+
+6.3 API exposée (via le Gateway : /api/statistics/...) :
+
+    ┌──────────┬──────────────────────────────┬──────────────────────────┐
+    │ Méthode  │ Endpoint                     │ Description              │
+    ├──────────┼──────────────────────────────┼──────────────────────────┤
+    │ GET      │ /admin                       │ Statistiques admin       │
+    │ GET      │ /medecin                     │ Stats pour un médecin   │
+    │ GET      │ /accueil                     │ Stats pour l'accueil    │
+    └──────────┴──────────────────────────────┴──────────────────────────┘
+
+    Chaque endpoint filtre par hospitalUser (pour non-ADMIN).
+    Les statistiques incluent : total patients, consultations,
+    répartition par statut, tendances mensuelles.
+
+═══════════════════════════════════════════════════════════════════════════════
+                      7. FRONTEND (frontend/)
+═══════════════════════════════════════════════════════════════════════════════
+
+7.1 Emplacement : /frontend
+7.2 Technologies :
+    - React 19.2
+    - React Router DOM 7.15
+    - Axios 1.16 (HTTP client)
+    - Vite 8.0 (build tool, rolldown)
+    - Tailwind CSS 4.3 (styles)
+    - Lucide React 1.16 (icônes)
+    - jsPDF 2.5 (génération PDF)
+    - i18next + react-i18next (traductions FR/EN)
+
+7.3 Configuration :
+    - VITE_API_URL=http://localhost:3000 (Gateway)
+    - Port de développement : 5173
+    - Build : vite build → dist/
+
+7.4 Arborescence des pages :
+    ┌─────────────────────────┬──────────────────┬──────────────────────┐
+    │ Pages                   │ Chemin           │ Permission requise   │
+    ├─────────────────────────┼──────────────────┼──────────────────────┤
+    │ Landing                 │ /                │ Public               │
+    │ Login                   │ /login           │ Public               │
+    │ Mot de passe oublié     │ /forgot-password │ Public               │
+    │ Change Password         │ /change-password │ Authentifié          │
+    │ Dashboard               │ /dashboard       │ Authentifié          │
+    │ Aide                    │ /help            │ Authentifié          │
+    │ Historique              │ /historique      │ MEDECIN/ACCUEIL      │
+    │ Liste Utilisateurs      │ /users           │ canViewUsers         │
+    │ Créer Utilisateur       │ /users/create    │ canManageUsers       │
+    │ Modifier Utilisateur    │ /users/:id/edit  │ canManageUsers       │
+    │ Profil Utilisateur      │ /users/:id       │ canViewUsers         │
+    │ Liste Hôpitaux          │ /hospitals       │ canManageHospitals   │
+    │ Créer Hôpital           │ /hospitals/create│ canManageHospitals   │
+    │ Modifier Hôpital        │ /hospitals/:id/edit│ canManageHospitals │
+    │ Liste Patients          │ /patients        │ canViewPatients      │
+    │ Créer Patient           │ /patients/create │ canManagePatients    │
+    │ Détail Patient          │ /patients/:id    │ canViewPatients      │
+    │ Modifier Patient        │ /patients/:id/edit│ canManagePatients   │
+    │ Liste Consultations     │ /consultations   │ canViewConsultations │
+    │ Créer Consultation      │ /consultations/create│ canCreateConsult  │
+    │ Détail Consultation     │ /consultations/:id│ canViewConsultations│
+    │ Modifier Consultation   │ /consultations/:id/edit│ canManageConsult│
+    │ Transférer Consultation │ /consultations/:id/transfer│ Authentifié │
+    │ Statistiques            │ /statistics      │ canViewStatistics    │
+    │ Demandes Reset Password │ /admin/password-resets│ canManageUsers   │
+    └─────────────────────────┴──────────────────┴──────────────────────┘
+
+7.5 Matrice des permissions (roleHelpers.js) :
+    ┌──────────────────┬──────────┬──────────┬──────────┐
+    │ Permission       │  ADMIN   │ MEDECIN  │ ACCUEIL  │
+    ├──────────────────┼──────────┼──────────┼──────────┤
+    │ canViewUsers     │ OUI      │ NON      │ NON      │
+    │ canManageUsers   │ OUI      │ NON      │ NON      │
+    │ canManageHospitals│ OUI     │ NON      │ NON      │
+    │ canViewPatients  │ OUI      │ OUI      │ OUI      │
+    │ canManagePatients│ NON      │ OUI      │ OUI      │
+    │ canViewConsultations│ OUI   │ OUI      │ OUI      │
+    │ canManageConsultations│ NON │ OUI      │ NON      │
+    │ canCreateConsultation│ NON │ OUI      │ OUI      │
+    │ canViewStatistics│ OUI      │ OUI      │ OUI      │
+    └──────────────────┴──────────┴──────────┴──────────┘
+
+    Rôle ACCUEIL - Restrictions supplémentaires :
+    - Ne voit PAS le contenu médical (motif, observations, conclusion,
+      décision, prescription, constantes) — masqué côté serveur ET UI
+    - Ne peut PAS transférer une consultation
+    - Ne peut PAS modifier les consultations
+    - Colonne "Motif" masquée dans la liste des consultations
+
+7.6 Authentification (AuthContext) :
+    - Stockage : localStorage (user, token, mustChangePassword)
+    - Intercepteur Axios : ajoute automatiquement le Bearer token
+    - Déconnexion automatique sur 401 (hors /login)
+    - JWT contient : id, email, roleUser, nameUser, hospitalUser, specialtyUser
+
+7.7 Composants partagés :
+    - Loader.jsx : Spinner animé (Loader2) utilisé dans 14 pages
+    - SearchableSelect.jsx : Sélecteur avec recherche
+    - ProtectedRoute.jsx : Garde de route par permission
+
+═══════════════════════════════════════════════════════════════════════════════
+                  8. FLUX D'AUTHENTIFICATION COMPLET
+═══════════════════════════════════════════════════════════════════════════════
+
+    Étape 1 : Frontend → POST /api/users/login
+             Body : { emailUser, passwordUser }
+
+    Étape 2 : Gateway reçoit la requête
+             - Logger enregistre la requête
+             - Rate limiter vérifie le quota
+             - Proxy /api/users → http://localhost:3001/login
+
+    Étape 3 : user-service traite le login
+             - AuthService.login() cherche l'utilisateur par email
+             - bcrypt.compare() vérifie le mot de passe
+             - generateToken() crée le JWT { id, email, roleUser, nameUser,
+               hospitalUser, specialtyUser }
+             - Envoi email notification de connexion (via Brevo)
+
+    Étape 4 : Gateway retourne la réponse au frontend
+             - { success, token, user: { id, nameUser, emailUser,
+               roleUser, hospitalUser, specialtyUser } }
+
+    Étape 5 : Frontend stocke le token et l'utilisateur
+             - AuthContext.login(userData, token)
+             - Redirection vers /dashboard
+
+    Workflow Mot de passe oublié :
+    Étape 1 : Frontend → POST /api/users/forgot-password
+             Body : { emailUser }
+    Étape 2 : user-service crée une demande (statut: pending)
+             - Envoie un email de notification à SUPPORT_EMAIL
+    Étape 3 : ADMIN → GET /admin/password-resets (liste des demandes)
+    Étape 4 : ADMIN → Approuve ou rejette
+             - PUT /api/users/password-reset-requests/:id/approve
+             - PUT /api/users/password-reset-requests/:id/reject
+    Étape 5 : Email envoyé à l'utilisateur avec le résultat
+
+═══════════════════════════════════════════════════════════════════════════════
+              9. SCHÉMA DE COMMUNICATION INTER-SERVICES
+═══════════════════════════════════════════════════════════════════════════════
+
+    Toute communication entre le frontend et les microservices passe
+    EXCLUSIVEMENT par le Gateway. Les microservices ne sont jamais
+    appelés directement par le frontend.
+
+    Frontend (5173)                    Gateway (3000)
+    ┌─────────┐                       ┌──────────────┐
+    │ Axios   │── POST /api/users/login──▶│ Proxy users  │──▶ user-service (3001)
+    │ baseURL │                          │ Proxy pat.   │──▶ patient-serv. (3002)
+    │:3000    │                          │ Proxy cons.  │──▶ consultation  (3003)
+    └─────────┘                          │ Proxy stats  │──▶ statistics   (3004)
+                                         └──────────────┘
+
+    Le Gateway :
+    - Ajoute le middleware d'auth JWT avant chaque proxy
+    - Forwarde le token original dans le header Authorization
+    - Chaque microservice vérifie le token de son côté
+    - Tous les services partagent le même JWT_SECRET
+    - Routes publiques bypassent l'authentification
+
+═══════════════════════════════════════════════════════════════════════════════
+            10. DÉPLOIEMENT (ENVIRONNEMENT DE PRODUCTION)
+═══════════════════════════════════════════════════════════════════════════════
+
+10.1 Architecture cible (Render) :
+    - Gateway : Web Service Render (Node)
+      → https://api-getway-tv5u.onrender.com
+    - user-service : Web Service Render (Node + MongoDB Atlas)
+    - patients-service : Web Service Render (Node + PostgreSQL Render)
+    - consultations-service : Web Service Render (Node + PostgreSQL Render)
+    - statistics-service : Web Service Render (Node + PostgreSQL + MongoDB)
+    - Frontend : Static Site Render (Vite build → dist/)
+      → https://medi-camer.vercel.app (Vercel)
+
+10.2 Variables d'environnement par service (Render) :
+
+    Gateway :
+    ┌─────────────────────────────────────────────────────┐
+    │ NODE_ENV=production                                  │
+    │ PORT=10000 (attribué par Render)                     │
+    │ USER_SERVICE_URL=https://user-service.onrender.com   │
+    │ PATIENT_SERVICE_URL=https://patient-service.onrender.com│
+    │ CONSULTATION_SERVICE_URL=https://consultation-serv.onrender.com│
+    │ JWT_SECRET=<à définir>                               │
+    │ RATE_LIMIT_MAX_REQUESTS=1000                         │
+    └─────────────────────────────────────────────────────┘
+
+    patients-service :
+    ┌─────────────────────────────────────────────────────┐
+    │ DATABASE_URL=<Internal URL PostgreSQL Render>        │
+    │ JWT_SECRET=<identique Gateway>                       │
+    │ ENCRYPTION_KEY=<64 caractères hex>                   │
+    │ CORS_ORIGIN=https://api-getway-tv5u.onrender.com     │
+    └─────────────────────────────────────────────────────┘
+
+    consultations-service :
+    ┌─────────────────────────────────────────────────────┐
+    │ DATABASE_URL=<même base que patients>                │
+    │ JWT_SECRET=<identique Gateway>                       │
+    │ ENCRYPTION_KEY=<même clé que patients-service>       │
+    │ CORS_ORIGIN=https://api-getway-tv5u.onrender.com     │
+    └─────────────────────────────────────────────────────┘
+
+    user-service :
+    ┌─────────────────────────────────────────────────────┐
+    │ MONGODB_URI=<URI MongoDB Atlas>                      │
+    │ JWT_SECRET=<identique Gateway>                       │
+    │ BREVO_API_KEY=<clé Brevo>                            │
+    │ BREVO_SENDER_EMAIL=dupontdjeague@gmail.com           │
+    │ FRONTEND_URL=https://medi-camer.vercel.app           │
+    │ SUPPORT_EMAIL=dupontdjeague@gmail.com                │
+    │ CORS_ORIGIN=https://api-getway-tv5u.onrender.com     │
+    └─────────────────────────────────────────────────────┘
+
+    statistics-service :
+    ┌─────────────────────────────────────────────────────┐
+    │ DATABASE_URL=<même base PostgreSQL>                  │
+    │ MONGODB_URI=<même MongoDB Atlas>                     │
+    │ JWT_SECRET=<identique Gateway>                       │
+    │ CORS_ORIGIN=https://api-getway-tv5u.onrender.com     │
+    └─────────────────────────────────────────────────────┘
+
+10.3 Commandes de build :
+    Gateway : npm start (Express, pas de build)
+    Frontend : npm run build → dist/ (fichiers statiques)
+
+10.4 Fichiers render.yaml :
+    Présents dans : Getway/, patients-service/, consultations-service/,
+    user-service/, frontend/, statistics-service/ (créé)
+
+
+═══════════════════════════════════════════════════════════════════════════════
+                 11. DÉPENDANCES COMPLÈTES (package.json)
+═══════════════════════════════════════════════════════════════════════════════
+
+    Gateway :
+    ├── express ^4.21.0
+    ├── http-proxy-middleware ^2.0.7
+    ├── jsonwebtoken ^9.0.3
+    ├── express-rate-limit ^7.4.0
+    ├── cors ^2.8.5
+    └── dotenv ^16.6.1
+
+    user-service :
+    ├── express ^4.18.2
+    ├── mongoose ^8.0.3
+    ├── bcryptjs ^2.4.3
+    ├── jsonwebtoken ^9.0.2
+    ├── nodemailer ^8.0.7
+    ├── cors ^2.8.6
+    └── dotenv ^16.6.1
+
+    patients-service :
+    ├── express ^5.2.1
+    ├── pg ^8.13.0
+    ├── jsonwebtoken ^9.0.2
+    ├── cors ^2.8.6
+    └── dotenv ^16.6.1
+
+    consultations-service :
+    ├── express ^5.2.1
+    ├── pg ^8.21.0
+    ├── jsonwebtoken ^9.0.3
+    ├── dotenv ^17.4.2
+    ├── cors ^2.8.6
+    └── jest + supertest (dev)
+
+    statistics-service :
+    ├── express ^5.2.1
+    ├── pg ^8.13.1
+    ├── mongoose ^8.9.5
+    ├── jsonwebtoken ^9.0.2
+    ├── cors ^2.8.5
+    └── dotenv ^16.4.7
+
+    frontend :
+    ├── react ^19.2.5
+    ├── react-dom ^19.2.5
+    ├── react-router-dom ^7.15.1
+    ├── axios ^1.16.1
+    ├── lucide-react ^1.16.0
+    ├── jspdf ^2.5.2
+    ├── i18next ^24.2.3
+    ├── react-i18next ^15.4.1
+    └── @tailwindcss/vite ^4.3.0
+
+═══════════════════════════════════════════════════════════════════════════════
+              12. COMMANDES DE DÉMARRAGE (DÉVELOPPEMENT)
+═══════════════════════════════════════════════════════════════════════════════
+
+    # Terminal 1 : user-service (port 3001)
+    cd user-service
+    npm run dev
+
+    # Terminal 2 : patients-service (port 3002)
+    cd patients-service
+    npm run dev
+
+    # Terminal 3 : consultations-service (port 3003)
+    cd consultations-service
+    npm run dev
+
+    # Terminal 4 : statistics-service (port 3004)
+    cd statistics-service
+    npm run dev
+
+    # Terminal 5 : Gateway (port 3000)
+    cd Getway
+    npm run dev
+
+    # Terminal 6 : Frontend (port 5173)
+    cd frontend
+    npm run dev
+
+    Tous les services doivent tourner simultanément en développement.
+    Le Gateway est le seul point d'accès (http://localhost:3000).
+
+═══════════════════════════════════════════════════════════════════════════════
+              13. WORKFLOW DE CRÉATION D'UN PATIENT (COMPLET)
+═══════════════════════════════════════════════════════════════════════════════
+
+    1. Frontend : remplir le formulaire (Nom*, Prénom, Date naissance*,
+       Sexe*, Téléphone 9 chiffres, Parents, Adresse, et champs complémentaires)
+    2. Frontend : cliquer "Créer le patient"
+    3. Frontend : POST /api/patients/check-duplicates (body: form data)
+       ↘ Gateway → patients-service → checkDuplicates()
+       ↳ Si doublons détectés → modale avec :
+         - Badges des champs correspondants (Nom, Téléphone, etc.)
+         - Liste des patients similaires avec leurs infos
+         - Lien pour voir le dossier existant
+         - Bouton "Créer quand même" ou "Revenir au formulaire"
+       ↳ Si aucun doublon → création directe
+    4. Frontend : POST /api/patients (body: form data)
+       ↘ Gateway → patients-service → create()
+       ↳ Génération du code patient unique (P-XXXXXXXX)
+       ↳ Insertion en base PostgreSQL
+    5. Réponse : 201 + données du patient avec code
+    6. Frontend : redirection vers /patients/{id} (page détail)
+
+═══════════════════════════════════════════════════════════════════════════════
+              14. WORKFLOW DE CONNEXION UTILISATEUR (COMPLET)
+═══════════════════════════════════════════════════════════════════════════════
+
+    1. Frontend : remplir email + mot de passe
+    2. Frontend : POST /api/users/login (body: { emailUser, passwordUser })
+       ↘ Gateway (limiteur + logger) → user-service
+    3. user-service : AuthService.login()
+       - Cherche user par email dans MongoDB
+       - Compare password avec bcrypt
+       - Génère JWT enrichi (24h) incluant hôpital et spécialité
+       - Envoie email de notification (Brevo)
+       - Retourne { success: true, token, user }
+    4. Gateway → Frontend
+    5. Frontend : AuthContext.login(user, token)
+       - Stocke dans localStorage
+       - Redirige vers /dashboard
+    6. Toutes les requêtes suivantes : Axios interceptor
+       ajoute automatiquement "Authorization: Bearer <token>"
+
+═══════════════════════════════════════════════════════════════════════════════
+                   15. GESTION DES ERREURS (ERROR HANDLING)
+═══════════════════════════════════════════════════════════════════════════════
+
+    Gateway (errorHandler.js) :
+    - Formate toutes les erreurs en JSON
+    - Codes gérés : 400, 401, 403, 404, 429, 500
+    - Structure : { success: false, error: { type, message, status,
+      timestamp, path } }
+
+    patients-service (errorHandler.js) :
+    - Erreurs de validation PostgreSQL → 400
+    - Erreurs de contrainte unique → 409
+    - Erreurs génériques → 500
+    - Blocage inter-hôpital → 403
+
+    consultations-service (errorHandler.js) :
+    - Champs déjà remplis par un confrère → 403
+    - Consultation non trouvée → 404
+    - Transfert par ACCUEIL → 403
+    - Erreurs génériques → 500
+
+    user-service :
+    - Gestion globale dans server.js (uncaughtException, unhandledRejection)
+    - Erreurs Mongoose (ValidationError) → 400
+    - Erreurs JWT → 401
+    - Erreurs d'autorisation → 403
+
+    Proxy (proxies.js) :
+    - onError : service indisponible → 503
+    - Les erreurs des microservices sont transmises telles quelles
+
+═══════════════════════════════════════════════════════════════════════════════
+                   16. INFORMATIONS COMPLÉMENTAIRES
+═══════════════════════════════════════════════════════════════════════════════
+
+16.1 Fichiers .gitignore :
+    - node_modules/ dans tous les services
+    - .env dans certains services (vérifier)
+    - dist/ dans le frontend
+
+16.2 Fichiers README :
+    - Gateway : README.md (présent, mis à jour)
+    - user-service : README.md (présent, mis à jour)
+    - patients-service : README.md (créé)
+    - consultations-service : README.md (créé)
+    - statistics-service : README.md (créé)
+    - frontend : README.md + STYLE.md (présents, mis à jour)
+
+16.3 Scripts de seed disponibles :
+    - user-service/src/seed.js (utilisateurs de test)
+    - user-service/src/seed-hospitals.js (hôpitaux de test)
+    - user-service/src/migrate-fields.js (migration de champs)
+
+16.4 Scripts utilitaires :
+    - consultations-service/scripts/encrypt-existing.js
+      (chiffre les anciennes données en clair)
+
+16.5 Tests :
+    - consultations-service : Jest + Supertest installés
+    - Autres services : pas de tests pour le moment
+
+16.6 Sécurité :
+    - JWT_SECRET doit être changé en production
+    - Les tokens JWT expirent après 24h
+    - Les mots de passe sont hashés avec bcrypt
+    - Rate limiting sur le Gateway (1000 req/15min)
+    - Chiffrement AES-256-GCM des données médicales sensibles
+    - Filtre hôpital injecté côté serveur (pas seulement UI)
+    - Rôle ACCUEIL : contenu médical masqué côté serveur
+    - Validation côté serveur : email, mot de passe, rôles, téléphone 9 chiffres
+    - Protection CSRF via token JWT (pas de cookie)
+
+16.7 Chiffrement AES-256-GCM :
+    - Algorithme : aes-256-gcm (Authenticated Encryption)
+    - Champ concernés : motif_consultation, observations, conclusion,
+      decision, prescription
+    - Clé : 32 bytes (64 hex) via ENCRYPTION_KEY
+    - IV : 16 bytes aléatoire par chiffrement
+    - Tag : 16 bytes (authentification)
+    - Format stocké : iv:tag:ciphertext
+    - Déchiffrement : automatique dans formatRow()
+    - Migration : script encrypt-existing.js pour les anciennes données
+
+════════════════════════════════════════════════════════════════════════════════
+    17. FONCTIONNEMENT GÉNÉRAL — EXPLICATION POUR TOUS
+════════════════════════════════════════════════════════════════════════════════
+
+    Ce qui suit est une explication en langage simple, sans termes
+    techniques compliqués. Elle est destinée à toute personne qui
+    veut comprendre comment fonctionne l'application, même sans
+    être développeur ou informaticien.
+
+
+    Imaginez un grand hôpital. Dans cet hôpital, il y a différents
+    services. Le service des ressources humaines qui gère le personnel,
+    le service des dossiers médicaux qui conserve les informations sur
+    les patients, le service des consultations qui enregistre les visites
+    chez le médecin, et le service des statistiques qui produit des
+    rapports. Chacun de ces services a son propre système de classement
+    et ses propres dossiers, mais tous communiquent par l'intermédiaire
+    d'un standard téléphonique central : le Gateway.
+
+
+    Le Gateway, c'est l'accueil de l'hôpital. Tout le monde doit passer
+    par lui pour être dirigé vers le bon service. Quand une personne
+    arrive, elle doit d'abord montrer son badge (le token JWT) pour
+    prouver qui elle est. Si le badge est valide, le Gateway la dirige
+    vers le service approprié. Il ne fait que trois choses : recevoir
+    la demande, vérifier le badge, et transmettre au bon endroit.
+
+
+    Il y a actuellement six services qui fonctionnent :
+
+    - user-service : le service du personnel. Il connaît les médecins,
+      les agents d'accueil et les administrateurs. Il gère leurs comptes,
+      leurs connexions, et les réinitialisations de mot de passe. Quand
+      quelqu'un demande un nouveau mot de passe, c'est un administrateur
+      qui doit approuver la demande avant que le changement soit effectif.
+      Toutes ces opérations sont notifiées par email.
+
+    - patients-service : le service des dossiers médicaux. Il stocke
+      toutes les informations sur les patients : nom, date de naissance,
+      numéro de téléphone, groupe sanguin, antécédents médicaux, etc.
+      Avant de créer un nouveau dossier, il vérifie automatiquement
+      qu'un patient similaire n'existe pas déjà. Si c'est le cas, il
+      affiche une alerte montrant exactement quels champs correspondent
+      (nom, téléphone, etc.) pour éviter les doublons.
+
+    - consultations-service : le service des visites médicales. Il gère
+      tout le cycle de vie d'une consultation : création par l'accueil,
+      prise en charge par le médecin, saisie des constantes (poids,
+      taille, température, tension), motif, observations, conclusion,
+      décision et prescription. Chaque modification est tracée dans un
+      journal des interventions. Les données les plus sensibles sont
+      chiffrées avec un code secret, comme si elles étaient rangées
+      dans un coffre-fort. Seul le système possède la clé pour les lire.
+
+    - statistics-service : le service des rapports et statistiques.
+      Il produit des tableaux de bord adaptés à chaque rôle : vue
+      globale pour l'administrateur, statistiques des consultations
+      pour le médecin, statistiques des créations pour l'accueil.
+
+    - frontend : l'interface visible sur l'écran de l'ordinateur.
+      C'est la partie que tout le monde voit et avec laquelle les
+      utilisateurs interagissent.
+
+    - Gateway : le chef d'orchestre qui coordonne tout.
+
+
+    Parlons des rôles. Chaque employé a un rôle qui détermine ce qu'il
+    a le droit de voir et de faire. Un médecin peut tout faire : créer
+    des patients, les modifier, créer et modifier des consultations,
+    les transférer vers un autre hôpital. Un agent d'accueil peut
+    créer des patients et des consultations, mais il ne voit pas le
+    contenu médical écrit par les médecins. Pour lui, ces champs sont
+    tout simplement invisibles, comme s'ils n'existaient pas. Il ne
+    peut pas non plus transférer une consultation. Un administrateur
+    gère les comptes des utilisateurs et les demandes de réinitialisation
+    de mot de passe. Ces règles sont appliquées de deux façons :
+    d'abord, les boutons et les menus correspondants n'apparaissent
+    pas sur l'écran de la personne, et ensuite, même si quelqu'un
+    essayait de contourner l'interface, le service refuserait la
+    demande. C'est une sécurité en deux couches.
+
+
+    Parlons maintenant du badge électronique, le token JWT. Quand un
+    employé se connecte avec son email et son mot de passe, le système
+    lui fabrique un badge qui contient son identité, son rôle, son
+    hôpital et sa spécialité. Ce badge est valable 24 heures. Après
+    ce délai, la personne doit se reconnecter. Le badge est fabriqué
+    par une machine spéciale appelée JWT_SECRET. Si cette machine
+    tombait entre de mauvaises mains, n'importe qui pourrait fabriquer
+    de faux badges. C'est pourquoi elle doit être gardée secrète,
+    surtout quand l'application est accessible sur Internet.
+
+
+    La sécurité des données médicales est une priorité. Les champs
+    les plus sensibles des consultations (le motif, les observations,
+    la conclusion, la décision et la prescription) sont chiffrés
+    avant d'être stockés dans la base de données. C'est comme si
+    chaque information était rangée dans une boîte fermée à clé.
+    Même si quelqu'un parvenait à s'introduire dans la base de
+    données, il ne pourrait pas lire ces informations sans la clé
+    de chiffrement. Cette clé est stockée dans un fichier de
+    configuration secret et jamais dans le code de l'application.
+
+
+    Et pourquoi avoir plusieurs services séparés plutôt qu'un seul
+    gros logiciel ? Il y a plusieurs bonnes raisons :
+
+    1. Chaque service peut être modifié indépendamment. On peut
+       améliorer la connexion sans toucher aux dossiers patients.
+
+    2. Chaque service utilise la meilleure technologie pour son
+       travail : MongoDB est flexible pour les comptes utilisateurs,
+       PostgreSQL est fiable et précis pour les données médicales.
+
+    3. La sécurité est renforcée : si un pirate parvient à entrer
+       dans un service, il n'a accès qu'à une partie des données.
+       Les dossiers médicaux sont séparés des comptes utilisateurs.
+
+    4. La charge de travail est répartie. Si tout le monde se
+       connecte en même temps le matin, seul le service des
+       connexions est sollicité.
+
+    5. Chaque service peut être installé sur un serveur différent,
+       voire dans des pays différents, pour plus de fiabilité.
+
+
+    Un mot sur les transferts de consultations entre hôpitaux.
+    Quand un médecin transfère une consultation vers un autre
+    hôpital, la consultation originale reste dans l'hôpital source
+    avec la mention "Transférée". Une copie complète est créée dans
+    l'hôpital de destination, avec tout l'historique des interventions
+    et les données médicales. Les deux hôpitaux peuvent ainsi suivre
+    le parcours du patient. Seuls les médecins peuvent effectuer
+    cette opération, pas les agents d'accueil.
+
+
+    Enfin, parlons de l'architecture globale. Le projet est composé
+    de plusieurs dépôts GitHub distincts, un par service :
+
+    - github.com/Dupont-fr/api-getway.git
+    - github.com/Dupont-fr/Hospital.git (user-service)
+    - github.com/Dupont-fr/patient-service.git
+    - github.com/Dupont-fr/consultations-service.git
+    - github.com/Dupont-fr/Statistique-service.git
+    - github.com/Dupont-fr/IN3_project-frontend.git
+
+    Chaque dépôt peut être développé, testé et déployé indépendamment
+    des autres, ce qui permet à plusieurs équipes de travailler en
+    parallèle sans se gêner.
+
+
+════════════════════════════════════════════════════════════════════════════════
+                  18. RECOMMANDATIONS ET ÉVOLUTIONS POSSIBLES
+════════════════════════════════════════════════════════════════════════════════
+
+    Immédiates :
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ 1. Ajouter des tests unitaires et d'intégration dans tous les serv.│
+    │ 2. Ajouter des fichiers .gitignore cohérents dans tous les services │
+    │ 3. Centraliser les définitions de rôles (actuellement dupliquées)   │
+    │ 4. Authentifier l'expéditeur Brevo (dupontdjeague@gmail.com)        │
+    └─────────────────────────────────────────────────────────────────────┘
+
+    Court terme :
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ 1. Ajouter un système de logging centralisé (Winston/Pino)         │
+    │ 2. Implémenter le refresh token pour l'authentification            │
+    │ 3. Ajouter un cache Redis pour les tokens et données fréquentes    │
+    │ 4. Filtrer les patients inactifs dans la liste (option toggle)     │
+    │ 5. Pagination complète dans tous les endpoints GET                 │
+    └─────────────────────────────────────────────────────────────────────┘
+
+    Moyen terme :
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ 1. Conteneuriser avec Docker (Dockerfile + docker-compose)         │
+    │ 2. Ajouter un service de notification (WhatsApp/SMS)               │
+    │ 3. Gestion des rendez-vous (agenda médical)                        │
+    │ 4. Chiffrement des données patients (au-delà des consultations)     │
+    └─────────────────────────────────────────────────────────────────────┘
+
+═══════════════════════════════════════════════════════════════════════════════
+                    19. STRUCTURE COMPLÈTE DES DOSSIERS
+═══════════════════════════════════════════════════════════════════════════════
+
+Getway/
+├── .env
+├── .env.example
+├── package.json
+├── render.yaml
+├── README.md
+└── src/
+    ├── server.js
+    ├── config/
+    │   └── proxies.js
+    └── middlewares/
+        ├── auth.js
+        ├── errorHandler.js
+        ├── logger.js
+        └── rateLimiter.js
+
+user-service/
+├── .env
+├── .env.example
+├── package.json
+├── render.yaml
+├── README.md
+└── src/
+    ├── server.js
+    ├── seed.js
+    ├── seed-hospitals.js
+    ├── migrate-fields.js
+    ├── config/
+    │   └── db.js
+    ├── controllers/
+    │   ├── hospital.controller.js
+    │   ├── user.controller.js
+    │   └── passwordReset.controller.js
+    ├── middlewares/
+    │   ├── auth.middleware.js
+    │   └── role.middleware.js
+    ├── models/
+    │   ├── hospital.model.js
+    │   ├── user.model.js
+    │   └── passwordReset.model.js
+    ├── routes/
+    │   ├── hospital.routes.js
+    │   ├── user.routes.js
+    │   └── passwordReset.routes.js
+    ├── services/
+    │   ├── auth.service.js
+    │   ├── email.service.js
+    │   └── passwordReset.service.js
+    └── utils/
+        └── generateToken.js
+
+patients-service/
+├── .env
+├── .env.example
+├── package.json
+├── render.yaml
+├── README.md
+├── tests/
+│   └── patient.test.js
+└── src/
+    ├── server.js
+    ├── config/
+    │   └── db.js
+    ├── controllers/
+    │   └── patient.controller.js
+    ├── middlewares/
+    │   ├── auth.middleware.js
+    │   └── errorHandler.js
+    ├── routes/
+    │   └── patient.routes.js
+    └── services/
+        └── patient.service.js
+
+consultations-service/
+├── .env
+├── .env.example
+├── package.json
+├── render.yaml
+├── README.md
+├── scripts/
+│   └── encrypt-existing.js
+├── tests/
+│   └── consultation.test.js
+└── src/
+    ├── server.js
+    ├── config/
+    │   └── db.js
+    ├── controllers/
+    │   └── consultation.controller.js
+    ├── middlewares/
+    │   ├── auth.middleware.js
+    │   └── errorHandler.js
+    ├── routes/
+    │   └── consultation.routes.js
+    ├── services/
+    │   └── consultation.service.js
+    └── utils/
+        └── encryption.js
+
+statistics-service/
+├── .env
+├── .env.example
+├── package.json
+├── render.yaml
+├── README.md
+└── src/
+    ├── server.js
+    ├── config/
+    │   └── db.js
+    ├── controllers/
+    │   └── statistics.controller.js
+    ├── middlewares/
+    │   └── auth.middleware.js
+    ├── routes/
+    │   └── statistics.routes.js
+    └── services/
+        └── statistics.service.js
+
+frontend/
+├── .env
+├── .env.production
+├── package.json
+├── vite.config.js
+├── index.html
+├── render.yaml
+├── README.md
+├── STYLE.md
+├── public/
+│   ├── Medilogo.png
+│   └── Medilogo.jpg
+└── src/
+    ├── main.jsx
+    ├── App.jsx
+    ├── index.css
+    ├── i18n.js
+    ├── api/
+    │   ├── axios.js
+    │   ├── consultationApi.js
+    │   ├── hospitalApi.js
+    │   ├── patientApi.js
+    │   └── userApi.js
+    ├── components/
+    │   ├── Loader.jsx
+    │   ├── ProtectedRoute.jsx
+    │   ├── SearchableSelect.jsx
+    │   └── layout/
+    │       ├── AppLayout.jsx
+    │       ├── Navbar.jsx
+    │       └── Sidebar.jsx
+    ├── context/
+    │   └── AuthContext.jsx
+    ├── pages/
+    │   ├── ChangePassword.jsx
+    │   ├── Dashboard.jsx
+    │   ├── ForgotPassword.jsx
+    │   ├── Help.jsx
+    │   ├── Historique.jsx
+    │   ├── Landing.jsx
+    │   ├── Login.jsx
+    │   ├── Admin/
+    │   │   └── PasswordResetRequests.jsx
+    │   ├── Consultations/
+    │   │   ├── ConsultationDetail.jsx
+    │   │   ├── ConsultationList.jsx
+    │   │   ├── CreateConsultation.jsx
+    │   │   ├── EditConsultation.jsx
+    │   │   └── TransferConsultation.jsx
+    │   ├── Patients/
+    │   │   ├── CreatePatient.jsx
+    │   │   ├── EditPatient.jsx
+    │   │   ├── PatientDetail.jsx
+    │   │   └── PatientList.jsx
+    │   ├── Statistics/
+    │   │   └── StatisticsIndex.jsx
+    │   └── Users/
+    │       ├── CreateUser.jsx
+    │       ├── EditUser.jsx
+    │       ├── UserList.jsx
+    │       └── UserProfile.jsx
+    ├── routes/
+    │   └── AppRoutes.jsx
+    └── utils/
+        └── roleHelpers.js
+
+═══════════════════════════════════════════════════════════════════════════════
+                   20. PORTS RÉSERVÉS PAR SERVICE
+═══════════════════════════════════════════════════════════════════════════════
+
+    ┌──────────────────────┬────────┬────────────────────────────────┐
+    │ Service              │ Port   │ Accès                          │
+    ├──────────────────────┼────────┼────────────────────────────────┤
+    │ Gateway              │ 3000   │ http://localhost:3000          │
+    │ user-service         │ 3001   │ http://localhost:3001          │
+    │ patients-service     │ 3002   │ http://localhost:3002          │
+    │ consultation-service │ 3003   │ http://localhost:3003          │
+    │ statistics-service   │ 3004   │ http://localhost:3004          │
+    │ Frontend (dev)       │ 5173   │ http://localhost:5173          │
+    │ PostgreSQL           │ 5432   │ localhost:5432                 │
+    │ MongoDB Atlas        │ 27017  │ Cluster MongoDB cloud          │
+    └──────────────────────┴────────┴────────────────────────────────┘
+
+═══════════════════════════════════════════════════════════════════════════════
+                  21. HISTORIQUE DES ÉVOLUTIONS RÉCENTES
+═══════════════════════════════════════════════════════════════════════════════
+
+    04/06/2026 - Correction des warnings d'index dupliqué Mongoose
+               - Suppression des schémas d'index redondants
+
+    04/06/2026 - Ajout de la détection des doublons patients
+               - Nouvelle route POST /check-duplicates
+               - Alerte modale dans CreatePatient
+
+    04/06/2026 - Correction du pathRewrite du Gateway
+               - Support des query strings dans les proxys
+
+    04/06/2026 - Ajout de la colonne code_patient avec génération auto
+               - Format : P-XXXXXXXX (alphabet sans ambiguïté)
+
+    04/06/2026 - Ajout de la colonne actif avec désactivation/réactivation
+               - Réservé au rôle MEDECIN
+               - Routes PUT /:id/desactiver et /:id/reactiver
+
+    04/06/2026 - Ajout du filtre hôpital JWT et protection inter-hôpital
+               - Injection hospitalUser dans le token
+               - Blocage 403 si l'hôpital ne correspond pas
+
+    04/06/2026 - Ajout du workflow de réinitialisation de mot de passe
+               - Modèle PasswordResetRequest
+               - Routes forgot-password, approve, reject
+               - Interface admin dans PasswordResetRequests.jsx
+
+    04/06/2026 - Ajout du transfert de consultations inter-hôpital
+               - Statut "transférée" avec badges
+               - Copie archive + duplicata en transaction
+               - Section transfert dans le PDF
+
+    04/06/2026 - Ajout de l'Historique (remplace Mes consultations)
+               - Groupé par date, différent selon le rôle
+
+    04/06/2026 - Ajout du Loader spinner (Loader2) sur 14 pages
+               - Logo Medilogo dans Landing, Login, Sidebar
+
+    04/06/2026 - Mise à jour des README des 6 microservices
+               - Création de GUIDE_COLLABORATION.doc
+               - Création de Diagrammes_Mermaid.ms
+
+    04/06/2026 - Filtre consultation par spécialité pour MEDECIN
+               - Vérifié dans doctor_specialty ET interventions
+
+    04/06/2026 - Contenu médical masqué pour le rôle ACCUEIL
+               - stripSensitiveFields() côté serveur
+               - Sections masquées dans l'UI
+               - Transfert bloqué pour ACCUEIL (403)
+
+    18/07/2026 - Chiffrement AES-256-GCM des champs sensibles
+               - encryption.js avec fonctions encrypt/decrypt
+               - Appliqué dans create(), update(), formatRow()
+               - Script encrypt-existing.js pour migration
+
+    18/07/2026 - Détection enrichie des doublons (matchedFields)
+               - Retourne les champs qui correspondent
+               - Badges dans l'alerte modale
+
+    18/07/2026 - Page d'aide contextuelle (/help)
+               - Contenu adapté au rôle (ACCUEIL/MEDECIN/ADMIN)
+               - Liens rapides, contact support, documentation
+
+═══════════════════════════════════════════════════════════════════════════════
+                         FIN DU RAPPORT TECHNIQUE
+═══════════════════════════════════════════════════════════════════════════════

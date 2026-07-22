@@ -1,0 +1,14 @@
+node_modules
+dist
+build
+.DS_Store
+*.log
+*.env
+*.local
+*.cache
+*.tmp
+*.bak
+*.swp
+claude.md
+claude1.md
+coverage/
