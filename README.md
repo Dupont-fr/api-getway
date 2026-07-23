@@ -40,7 +40,7 @@ Port par défaut : `5000`
 |---|---|---|
 | `/api/users/*` | user-service :5001 | Utilisateurs, hôpitaux |
 | `/api/patients/*` | patient-service :5002 | Patients |
-| `/api/consultations/*` | consultation-service :5003 | Consultations |
+| `/api/consultations/*` | consultation-service :5003 | Consultations, examens, notifications |
 | `/api/statistics/*` | statistic-service :5004 | Statistiques |
 
 ## Endpoints publics (sans token)
@@ -67,6 +67,12 @@ Frontend → Gateway (:5000) → /api/users/* → user-service (:5001)
                            → /api/consultations/* → consultation-service (:5003)
                            → /api/statistics/* → statistic-service (:5004)
 ```
+
+## Notes de déploiement
+
+- En production, le frontend (Vercel) communique directement avec le Gateway (Render)
+- Les microservices internes communiquent entre eux via `INTERNAL_API_KEY`
+- Le WebSocket (consultations-service :3003) est connecté directement par le frontend via `VITE_SOCKET_URL`
 
 ## Dépôts liés
 
